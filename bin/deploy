@@ -1,0 +1,65 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+DEPLOY_DIR="${DEPLOY_DIR:-/opt/posthog}"
+
+echo "Deploying PostHog to $DEPLOY_DIR"
+
+# Create deploy directory
+mkdir -p "$DEPLOY_DIR"
+cd "$DEPLOY_DIR"
+
+# Create network if not exists
+docker network create web 2>/dev/null || true
+
+# Copy only required files (not entire repo)
+# docker-compose files
+cp "$REPO_DIR/docker-compose.base.yml" docker-compose.base.yml
+cp "$REPO_DIR/docker-compose.hobby.yml" docker-compose.yml
+
+# compose scripts (start, wait, temporal-django-worker)
+rm -rf compose
+cp -r "$REPO_DIR/compose" .
+
+# docker configs (clickhouse, temporal, livestream)
+rm -rf docker
+cp -r "$REPO_DIR/docker" .
+
+# posthog subdirectory files needed by clickhouse
+mkdir -p posthog
+cp -r "$REPO_DIR/posthog/idl" posthog/ 2>/dev/null || true
+cp -r "$REPO_DIR/posthog/user_scripts" posthog/ 2>/dev/null || true
+
+# Create share dir for GeoIP
+mkdir -p share
+if [ ! -f share/GeoLite2-City.mmdb ]; then
+    echo "Downloading GeoIP database..."
+    curl -L 'https://mmdbcdn.posthog.net/' --http1.1 | brotli --decompress --output=share/GeoLite2-City.mmdb
+fi
+# Fix permissions for containers running as non-root
+chmod 755 share
+chmod 644 share/GeoLite2-City.mmdb
+
+# Create .env if not exists
+if [ ! -f .env ]; then
+    echo "Creating .env from template..."
+    POSTHOG_SECRET=$(head -c 28 /dev/urandom | sha224sum -b | head -c 56)
+    ENCRYPTION_SALT=$(openssl rand -hex 16)
+    cat > .env << EOF
+POSTHOG_SECRET=$POSTHOG_SECRET
+ENCRYPTION_SALT_KEYS=$ENCRYPTION_SALT
+DOMAIN=${POSTHOG_DOMAIN:-localhost}
+CADDY_TLS_BLOCK=auto_https off
+CADDY_HOST=':80'
+POSTHOG_APP_TAG=latest
+REGISTRY_URL=${DOCKER_REGISTRY:-posthog/posthog}
+EOF
+fi
+
+echo "Starting PostHog..."
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d --no-build
+
+echo "Done! PostHog is starting at https://${POSTHOG_DOMAIN:-localhost}"

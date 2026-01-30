@@ -1,0 +1,93 @@
+stages:
+  - deploy
+
+variables:
+  GIT_DEPTH: 0
+  DEPLOY_DIR: /opt/posthog
+  REPO_URL: ${POSTHOG_REPO_URL}
+
+deploy_posthog:
+  stage: deploy
+  tags:
+    - monitoring-server
+  script:
+    - mkdir -p $DEPLOY_DIR
+    - cd $DEPLOY_DIR
+
+    # Clone or update repository (standard PostHog approach)
+    - |
+      if [ -d posthog/.git ]; then
+        echo "Updating existing repository..."
+        cd posthog
+        git fetch origin
+        git reset --hard origin/master
+        cd ..
+      else
+        echo "Cloning repository..."
+        rm -rf posthog
+        git clone --filter=blob:none $REPO_URL posthog
+      fi
+
+    # Copy compose files to parent directory
+    - cp posthog/docker-compose.base.yml docker-compose.base.yml
+    - cp posthog/docker-compose.hobby.yml docker-compose.yml
+
+    # Create network if not exists
+    - docker network create web 2>/dev/null || true
+
+    # Create share dir for GeoIP
+    - mkdir -p share
+    - |
+      if [ ! -f share/GeoLite2-City.mmdb ]; then
+        echo "Downloading GeoIP database..."
+        curl -L 'https://mmdbcdn.posthog.net/' --http1.1 | brotli --decompress --output=share/GeoLite2-City.mmdb
+      fi
+    - chmod 755 share
+    - chmod 644 share/GeoLite2-City.mmdb
+
+    # Create .env if not exists
+    - |
+      if [ ! -f .env ]; then
+        echo "Creating .env..."
+        POSTHOG_SECRET=$(head -c 28 /dev/urandom | sha224sum -b | head -c 56)
+        ENCRYPTION_SALT=$(openssl rand -hex 16)
+        cat > .env << EOF
+      POSTHOG_SECRET=$POSTHOG_SECRET
+      ENCRYPTION_SALT_KEYS=$ENCRYPTION_SALT
+      DOMAIN=$POSTHOG_DOMAIN
+      CADDY_TLS_BLOCK=auto_https off
+      CADDY_HOST=':80'
+      POSTHOG_APP_TAG=latest
+      REGISTRY_URL=$DOCKER_REGISTRY
+      OPT_OUT_CAPTURE=true
+      POSTHOG_SKIP_MIGRATION_CHECKS=1
+      EOF
+      fi
+
+    # Ensure custom image is used (update existing .env)
+    - sed -i "s|REGISTRY_URL=posthog/posthog|REGISTRY_URL=$DOCKER_REGISTRY|" .env
+
+    # Login to Docker Hub to pull custom image
+    - echo "$DOCKER_HUB_TOKEN" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
+
+    # Deploy
+    - docker compose -f docker-compose.yml pull
+    - docker compose -f docker-compose.yml up -d --no-build
+
+    - echo "Done! PostHog is starting at https://$POSTHOG_DOMAIN"
+  only:
+    - main
+    - master
+  when: manual
+
+stop_posthog:
+  stage: deploy
+  tags:
+    - monitoring-server
+  script:
+    - cd /opt/posthog
+    - docker compose -f docker-compose.yml down
+  only:
+    - main
+    - master
+  when: manual

@@ -253,7 +253,7 @@ services:
         restart: on-failure
 
     capture:
-        image: ghcr.io/posthog/posthog/capture:master
+        image: ${REGISTRY_URL}:capture
         build:
             context: rust/
             args:
@@ -268,7 +268,7 @@ services:
             RUST_LOG: 'info,rdkafka=warn'
 
     replay-capture:
-        image: ghcr.io/posthog/posthog/capture:master
+        image: ${REGISTRY_URL}:capture
         build:
             context: rust/
             args:
@@ -282,7 +282,7 @@ services:
             CAPTURE_MODE: recordings
 
     capture-ai:
-        image: ghcr.io/posthog/posthog/capture:master
+        image: ${REGISTRY_URL}:capture
         build:
             context: rust/
             args:
@@ -304,7 +304,7 @@ services:
             AI_S3_SECRET_ACCESS_KEY: object_storage_root_password
 
     capture-logs:
-        image: ghcr.io/posthog/posthog/capture-logs:master
+        image: ${REGISTRY_URL}:capture-logs
         build:
             context: rust/
             args:
@@ -323,7 +323,7 @@ services:
             - default
 
     property-defs-rs:
-        image: ghcr.io/posthog/posthog/property-defs-rs:master
+        image: ${REGISTRY_URL}:property-defs-rs
         build:
             context: rust/
             args:
@@ -337,7 +337,7 @@ services:
             FILTER_MODE: 'opt-out'
 
     feature-flags:
-        image: ghcr.io/posthog/posthog/feature-flags:master
+        image: ${REGISTRY_URL}:feature-flags
         build:
             context: rust/
             args:
@@ -384,7 +384,7 @@ services:
             COOKIELESS_REDIS_PORT: 6379
 
     livestream:
-        image: 'ghcr.io/posthog/posthog/livestream:master'
+        image: '${REGISTRY_URL}:livestream'
         restart: on-failure
         depends_on:
             kafka:
@@ -476,7 +476,7 @@ services:
             TEMPORAL_HOST: temporal
 
     cyclotron-janitor:
-        image: ghcr.io/posthog/posthog/cyclotron-janitor:master
+        image: ${REGISTRY_URL}:cyclotron-janitor
         build:
             context: rust/
             args:

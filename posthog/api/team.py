@@ -1499,9 +1499,8 @@ class PremiumMultiEnvironmentPermission(BasePermission):
             if current_non_demo_team_count >= allowed_team_per_project_count:
                 return False
         else:
-            # If the org doesn't have the feature, they can only have one non-demo project
-            if current_non_demo_team_count >= 1:
-                return False
+            # Self-hosted: allow unlimited environments
+            return True
 
         # in any other case, we're good to go
         return True

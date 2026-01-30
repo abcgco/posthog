@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 .dlt
 .dmypy.json
+CLAUDE.md
 .DS_Store
 .eslintcache
 .mypy_cache
@@ -165,4 +166,4 @@ data/seaweedfs/
 # Ignore Agent OS (Claude Code) files
 .claude/agents/agent-os
 .claude/commands/agent-os
-agent-os/
+agent-os/.docker-hashes
