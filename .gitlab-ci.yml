@@ -66,6 +66,7 @@ deploy_posthog:
 
     # Ensure custom image is used (update existing .env)
     - sed -i "s|REGISTRY_URL=posthog/posthog|REGISTRY_URL=$DOCKER_REGISTRY|" .env
+    - grep -q "^ADMIN_PORTAL_ENABLED=" .env || echo "ADMIN_PORTAL_ENABLED=true" >> .env
 
     # Login to Docker Hub to pull custom image
     - echo "$DOCKER_HUB_TOKEN" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
