@@ -880,7 +880,7 @@ def redirect_to_site(request):
         "productTourId": request.GET.get("productTourId"),
         "userIntent": request.GET.get("userIntent"),
         "toolbarVersion": "toolbar",
-        "apiURL": request.build_absolute_uri("/")[:-1],
+        "apiURL": settings.SITE_URL,
         "dataAttributes": team.data_attributes,
     }
 
