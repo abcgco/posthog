@@ -436,6 +436,7 @@ def get_context_for_template(
     posthog_app_context: dict[str, Any] = {
         "persisted_feature_flags": settings.PERSISTED_FEATURE_FLAGS,
         "anonymous": not request.user or not request.user.is_authenticated,
+        "enable_web_experiments": settings.ENABLE_WEB_EXPERIMENTS,
     }
 
     posthog_bootstrap: dict[str, Any] = {}

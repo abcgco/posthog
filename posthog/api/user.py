@@ -882,6 +882,7 @@ def redirect_to_site(request):
         "toolbarVersion": "toolbar",
         "apiURL": settings.SITE_URL,
         "dataAttributes": team.data_attributes,
+        "enableWebExperiments": settings.ENABLE_WEB_EXPERIMENTS,
     }
 
     toolbar_flags_key = request.GET.get("toolbarFlagsKey")

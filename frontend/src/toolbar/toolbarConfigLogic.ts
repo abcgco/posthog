@@ -78,6 +78,7 @@ export const toolbarConfigLogic = kea<toolbarConfigLogicType>([
         dataAttributes: [(s) => [s.props], (props): string[] => props.dataAttributes ?? []],
         isAuthenticated: [(s) => [s.temporaryToken], (temporaryToken) => !!temporaryToken],
         toolbarFlagsKey: [(s) => [s.props], (props): string | undefined => props.toolbarFlagsKey],
+        enableWebExperiments: [(s) => [s.props], (props): boolean => props.enableWebExperiments ?? false],
     }),
 
     listeners(({ values, actions }) => ({

@@ -803,6 +803,7 @@ export interface ToolbarParams {
     dataAttributes?: string[]
     toolbarFlagsKey?: string
     productTourId?: string
+    enableWebExperiments?: boolean
 }
 
 export interface ToolbarProps extends ToolbarParams {
@@ -4353,6 +4354,7 @@ export interface AppContext {
     preflight: PreflightStatus
     default_event_name: string
     persisted_feature_flags?: string[]
+    enable_web_experiments?: boolean
     anonymous: boolean
     frontend_apps?: Record<number, FrontendAppConfig>
     effective_resource_access_control: Record<AccessControlResourceType, AccessControlLevel>

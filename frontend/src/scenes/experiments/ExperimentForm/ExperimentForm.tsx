@@ -26,7 +26,10 @@ import { ExposureCriteriaPanelHeader } from './ExposureCriteriaPanelHeader'
 import { MetricsPanel, MetricsPanelHeader } from './MetricsPanel'
 import { VariantsPanel } from './VariantsPanel'
 import { VariantsPanelHeader } from './VariantsPanelHeader'
+import { getAppContext } from 'lib/utils/getAppContext'
+
 import { createExperimentLogic } from './createExperimentLogic'
+import { ExperimentTypePanel } from './ExperimentTypePanel'
 
 const LemonFieldError = ({ error }: { error: string }): JSX.Element => {
     return (
@@ -67,6 +70,7 @@ export const ExperimentForm = ({ draftExperiment, tabId }: ExperimentFormProps):
 
     const { featureFlags } = useValues(featureFlagLogic)
     const showNewExperimentFormLayout = featureFlags[FEATURE_FLAGS.EXPERIMENTS_LEAN_CREATION_FORM] === 'test'
+    const showWebExperiments = getAppContext()?.enable_web_experiments ?? false
 
     const [selectedPanel, setSelectedPanel] = useState<string | null>(null)
     const handleCancel = (): void => {
@@ -139,6 +143,17 @@ export const ExperimentForm = ({ draftExperiment, tabId }: ExperimentFormProps):
                         }}
                     />
                 </SceneSection>
+                {showWebExperiments && (
+                    <>
+                        <SceneDivider />
+                        <SceneSection title="Experiment type">
+                            <ExperimentTypePanel
+                                experiment={experiment}
+                                setExperimentType={(type) => setExperimentValue('type', type)}
+                            />
+                        </SceneSection>
+                    </>
+                )}
                 <SceneDivider />
             </>
         )

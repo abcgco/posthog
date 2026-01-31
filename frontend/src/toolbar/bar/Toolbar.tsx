@@ -275,10 +275,10 @@ export function ToolbarInfoMenu(): JSX.Element | null {
     const { visibleMenu, isDragging, menuProperties, minimized, isBlurred } = useValues(toolbarLogic)
     const { setMenu } = useActions(toolbarLogic)
 
-    const { isAuthenticated } = useValues(toolbarConfigLogic)
+    const { isAuthenticated, enableWebExperiments } = useValues(toolbarConfigLogic)
 
     const showExperimentsFlag = useToolbarFeatureFlag('web-experiments')
-    const showExperiments = inStorybook() || inStorybookTestRunner() || showExperimentsFlag
+    const showExperiments = inStorybook() || inStorybookTestRunner() || showExperimentsFlag || enableWebExperiments
 
     const productToursFlag = useToolbarFeatureFlag('product-tours-2025')
     const showProductTours = inStorybook() || inStorybookTestRunner() || productToursFlag
@@ -344,12 +344,12 @@ export function Toolbar(): JSX.Element | null {
         useValues(toolbarLogic)
     const { setVisibleMenu, toggleMinimized, onMouseOrTouchDown, setElement, setIsBlurred, completeGracefulExit } =
         useActions(toolbarLogic)
-    const { isAuthenticated, userIntent } = useValues(toolbarConfigLogic)
+    const { isAuthenticated, userIntent, enableWebExperiments } = useValues(toolbarConfigLogic)
     const { authenticate } = useActions(toolbarConfigLogic)
     const { selectedTourId, isPreviewing } = useValues(productToursLogic)
 
     const showExperimentsFlag = useToolbarFeatureFlag('web-experiments')
-    const showExperiments = inStorybook() || inStorybookTestRunner() || showExperimentsFlag
+    const showExperiments = inStorybook() || inStorybookTestRunner() || showExperimentsFlag || enableWebExperiments
 
     const productToursFlag = useToolbarFeatureFlag('product-tours-2025')
     const showProductTours = inStorybook() || inStorybookTestRunner() || productToursFlag

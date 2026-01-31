@@ -8,6 +8,8 @@ from posthog.settings.utils import get_from_env, get_list
 # NOTE: This only affects the frontend, the same FFs will still be considered disabled on the backend
 PERSISTED_FEATURE_FLAGS = get_list(os.getenv("PERSISTED_FEATURE_FLAGS", ""))
 
+ENABLE_WEB_EXPERIMENTS: bool = os.getenv("ENABLE_WEB_EXPERIMENTS", "true").lower() in ("true", "1", "yes")
+
 # Per-team local evaluation rate limits, e.g. {"123": "1200/minute", "456": "2400/hour"}
 LOCAL_EVAL_RATE_LIMITS: dict[int, str] = {}
 with suppress(Exception):
