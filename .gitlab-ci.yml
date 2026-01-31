@@ -1,10 +1,42 @@
 stages:
+  - build
   - deploy
 
 variables:
   GIT_DEPTH: 0
   DEPLOY_DIR: /opt/posthog
   REPO_URL: ${POSTHOG_REPO_URL}
+
+build_posthog:
+  stage: build
+  tags:
+    - monitoring-server
+  script:
+    - echo "$DOCKER_HUB_TOKEN" | docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
+
+    - mkdir -p /opt/posthog
+    - cd /opt/posthog
+
+    - |
+      if [ -d posthog/.git ]; then
+        cd posthog
+        git fetch origin
+        git reset --hard origin/master
+        cd ..
+      else
+        rm -rf posthog
+        git clone --filter=blob:none $REPO_URL posthog
+      fi
+
+    - cd posthog
+    - echo "Building $DOCKER_REGISTRY:latest..."
+    - docker build -t $DOCKER_REGISTRY:latest .
+    - docker push $DOCKER_REGISTRY:latest
+    - echo "Image pushed to $DOCKER_REGISTRY:latest"
+  only:
+    - main
+    - master
+  when: manual
 
 deploy_posthog:
   stage: deploy

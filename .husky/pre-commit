@@ -30,23 +30,25 @@ if [ "$CURRENT_HASH" = "$STORED_HASH" ]; then
     exit 0
 fi
 
-echo "Building main image ($REGISTRY:latest) for linux/amd64..."
-docker buildx build \
-    --platform linux/amd64 \
-    --tag "$REGISTRY:latest" \
-    --push \
-    "$REPO_ROOT"
-
-if [ $? -ne 0 ]; then
-    echo "ERROR: main image build failed"
-    exit 1
-fi
-
-if [ -f "$HASH_FILE" ]; then
-    sed -i '' "s/^main:.*$/main:$CURRENT_HASH/" "$HASH_FILE"
-else
-    echo "main:$CURRENT_HASH" > "$HASH_FILE"
-fi
-
-git add "$HASH_FILE"
-echo "main image pushed to $REGISTRY:latest"
+# Build moved to GitLab CI (build_posthog stage)
+# echo "Building main image ($REGISTRY:latest) for linux/amd64..."
+# docker buildx build \
+#     --platform linux/amd64 \
+#     --tag "$REGISTRY:latest" \
+#     --push \
+#     "$REPO_ROOT"
+#
+# if [ $? -ne 0 ]; then
+#     echo "ERROR: main image build failed"
+#     exit 1
+# fi
+#
+# if [ -f "$HASH_FILE" ]; then
+#     sed -i '' "s/^main:.*$/main:$CURRENT_HASH/" "$HASH_FILE"
+# else
+#     echo "main:$CURRENT_HASH" > "$HASH_FILE"
+# fi
+#
+# git add "$HASH_FILE"
+# echo "main image pushed to $REGISTRY:latest"
+echo "main image build skipped (use GitLab CI build_posthog job)"
