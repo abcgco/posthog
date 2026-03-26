@@ -50,6 +50,9 @@ services:
         extends:
             file: docker-compose.base.yml
             service: zookeeper
+        environment:
+            ZOO_AUTOPURGE_PURGEINTERVAL: 1
+            ZOO_AUTOPURGE_SNAPRETAINCOUNT: 3
         volumes:
             - zookeeper-datalog:/datalog
             - zookeeper-data:/data
