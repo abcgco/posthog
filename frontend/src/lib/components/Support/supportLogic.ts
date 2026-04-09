@@ -7,9 +7,9 @@ import api from 'lib/api'
 import { lemonToast } from 'lib/lemon-ui/LemonToast/LemonToast'
 import { uuid } from 'lib/utils'
 import { parseExceptionEvent } from 'lib/utils/exceptionUtils'
-import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { billingLogic } from 'scenes/billing/billingLogic'
 import { organizationLogic } from 'scenes/organizationLogic'
+import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { teamLogic } from 'scenes/teamLogic'
 import { userLogic } from 'scenes/userLogic'
 
@@ -25,8 +25,8 @@ import {
     UserType,
 } from '~/types'
 
-import { openSupportModal } from './SupportModal'
 import type { supportLogicType } from './supportLogicType'
+import { openSupportModal } from './SupportModal'
 
 export function getPublicSupportSnippet(
     cloudRegion: Region | null | undefined,
@@ -146,6 +146,11 @@ export const TARGET_AREA_TO_NAME = [
                 label: 'Data ingestion',
             },
             {
+                value: 'health_overview',
+                'data-attr': `support-form-target-area-health_overview`,
+                label: 'Health overview',
+            },
+            {
                 value: 'data_management',
                 'data-attr': `support-form-target-area-data_management`,
                 label: 'Data management (incl. events, actions, properties)',
@@ -189,6 +194,11 @@ export const TARGET_AREA_TO_NAME = [
                 value: 'data_warehouse',
                 'data-attr': `support-form-target-area-data_warehouse`,
                 label: 'Data warehouse (sources)',
+            },
+            {
+                value: 'data_modeling',
+                'data-attr': `support-form-target-area-data_modeling`,
+                label: 'Data modeling (views, matviews, endpoints)',
             },
             {
                 value: 'batch_exports',
@@ -241,8 +251,8 @@ export const TARGET_AREA_TO_NAME = [
                 label: 'PostHog AI',
             },
             {
-                value: 'mcp-server',
-                'data-attr': `support-form-target-area-mcp-server`,
+                value: 'posthog-mcp',
+                'data-attr': `support-form-target-area-posthog-mcp`,
                 label: 'MCP Server',
             },
             {
@@ -285,11 +295,6 @@ export const TARGET_AREA_TO_NAME = [
                 'data-attr': `support-form-target-area-logs`,
                 label: 'Logs',
             },
-            {
-                value: 'endpoints',
-                'data-attr': `support-form-target-area-endpoints`,
-                label: 'Endpoints',
-            },
         ],
     },
 ]
@@ -317,6 +322,7 @@ export type SupportTicketTargetArea =
     | 'data_management'
     | 'notebooks'
     | 'data_warehouse'
+    | 'data_modeling'
     | 'feature_flags'
     | 'analytics'
     | 'session_replay'
@@ -324,7 +330,6 @@ export type SupportTicketTargetArea =
     | 'surveys'
     | 'web_analytics'
     | 'error_tracking'
-    | 'logs'
     | 'cdp_destinations'
     | 'data_ingestion'
     | 'batch_exports'
@@ -333,7 +338,7 @@ export type SupportTicketTargetArea =
     | 'max-ai'
     | 'customer-analytics'
     | 'logs'
-    | 'endpoints'
+    | 'health_overview'
 export type SupportTicketSeverityLevel = keyof typeof SEVERITY_LEVEL_TO_NAME
 export type SupportTicketKind = keyof typeof SUPPORT_KIND_TO_SUBJECT
 
@@ -378,7 +383,6 @@ export const URL_PATH_TO_TARGET_AREA: Record<string, SupportTicketTargetArea> = 
     workflows: 'workflows',
     billing: 'billing',
     logs: 'logs',
-    endpoints: 'endpoints',
 }
 
 export const SUPPORT_TICKET_TEMPLATES = {

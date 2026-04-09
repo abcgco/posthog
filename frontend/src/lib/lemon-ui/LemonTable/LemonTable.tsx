@@ -8,18 +8,18 @@ import React, { HTMLProps, useCallback, useEffect, useMemo, useRef, useState } f
 import { IconInfo } from '@posthog/icons'
 
 import { ScrollableShadows } from 'lib/components/ScrollableShadows/ScrollableShadows'
+import { IconWithCount } from 'lib/lemon-ui/icons'
 import { LemonButtonWithDropdown } from 'lib/lemon-ui/LemonButton'
 import { More } from 'lib/lemon-ui/LemonButton/More'
 import { LemonSkeleton } from 'lib/lemon-ui/LemonSkeleton'
-import { IconWithCount } from 'lib/lemon-ui/icons'
 
 import { useColumnWidths } from '../../hooks/useColumnWidths'
 import { PaginationAuto, PaginationControl, PaginationManual, usePagination } from '../PaginationControl'
 import { Tooltip } from '../Tooltip'
-import { LemonTableLoader } from './LemonTableLoader'
-import { TableRow } from './TableRow'
 import { determineColumnKey, getStickyColumnInfo } from './columnUtils'
+import { LemonTableLoader } from './LemonTableLoader'
 import { Sorting, SortingIndicator, getNextSorting } from './sorting'
+import { TableRow } from './TableRow'
 import { ExpandableConfig, LemonTableColumnGroup, LemonTableColumns } from './types'
 
 export interface LemonTableProps<T extends Record<string, any>> {
@@ -88,7 +88,11 @@ export interface LemonTableProps<T extends Record<string, any>> {
     maxHeaderWidth?: string
     /** Whether to hide the scrollbar. */
     hideScrollbar?: boolean
-    /** Row actions to display in a "More" menu at the end of each row. Return null to hide actions for specific rows. */
+    /**
+     * Whether the table content is allowed to scroll inside its container.
+     */
+    allowContentScroll?: boolean
+    /** Row actions to display at the end of each row. Return null to hide actions for specific rows. */
     rowActions?: (record: T, recordIndex: number) => React.ReactNode | null
     /** Whether to hide the sorting indicator when no sort is active. Defaults to false. */
     hideSortingIndicatorWhenInactive?: boolean
@@ -129,6 +133,7 @@ export function LemonTable<T extends Record<string, any>>({
     pinnedColumns,
     maxHeaderWidth,
     hideScrollbar,
+    allowContentScroll = false,
     rowActions,
     hideSortingIndicatorWhenInactive = false,
 }: LemonTableProps<T>): JSX.Element {
@@ -162,16 +167,18 @@ export function LemonTable<T extends Record<string, any>>({
         [location, searchParams, hashParams, push, useURLForSorting, onSort, currentSortingParam]
     )
 
-    const columnGroups = (
-        rawColumns.length > 0 && 'children' in rawColumns[0]
-            ? rawColumns
-            : [
-                  {
-                      children: rawColumns,
-                  },
-              ]
-    ) as LemonTableColumnGroup<T>[]
-    const columns = columnGroups.flatMap((group) => group.children)
+    const columnGroups = useMemo(
+        () =>
+            (rawColumns.length > 0 && 'children' in rawColumns[0]
+                ? rawColumns
+                : [
+                      {
+                          children: rawColumns,
+                      },
+                  ]) as LemonTableColumnGroup<T>[],
+        [rawColumns]
+    )
+    const columns = useMemo(() => columnGroups.flatMap((group) => group.children), [columnGroups])
 
     const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -211,17 +218,33 @@ export function LemonTable<T extends Record<string, any>>({
     }, [dataSource, currentSorting, columns])
 
     const paginationState = usePagination(sortedDataSource, pagination, id)
+    const previousPageRef = useRef<number | null>(null)
 
     useEffect(() => {
+        // Don't auto-scroll on initial mount
+        if (previousPageRef.current === null) {
+            previousPageRef.current = paginationState.currentPage
+            return
+        }
+        if (previousPageRef.current === paginationState.currentPage) {
+            return
+        }
+        previousPageRef.current = paginationState.currentPage
+
         // When the current page changes, scroll back to the top of the table
         if (scrollRef.current) {
             const realTableOffsetTop = scrollRef.current.getBoundingClientRect().top - 320 // Extra breathing room
             // If the table starts above the top edge of the view, scroll to the top of the table minus breathing room
             if (realTableOffsetTop < 0) {
-                window.scrollTo(window.scrollX, window.scrollY + realTableOffsetTop)
+                const scrollContainer = document.querySelector('main') || window
+                if (scrollContainer === window) {
+                    window.scrollTo(window.scrollX, window.scrollY + realTableOffsetTop)
+                } else {
+                    scrollContainer.scrollBy(0, realTableOffsetTop)
+                }
             }
         }
-    }, [paginationState.currentPage, scrollRef.current])
+    }, [paginationState.currentPage])
 
     if (firstColumnSticky && expandable) {
         // Due to CSS, for firstColumnSticky to work the first column needs to be a content column
@@ -229,6 +252,13 @@ export function LemonTable<T extends Record<string, any>>({
     }
 
     const isRowExpansionToggleShown = expandable ? (expandable?.showRowExpansionToggle ?? true) : false
+
+    const visibleDataColumnCount = useMemo(() => columns.filter((column) => !column.isHidden).length, [columns])
+    // Matches the main header row cell count so the loader row does not add an extra table column (which shifts headers while loading)
+    const headerLoaderColSpan = Math.max(
+        1,
+        Number(isRowExpansionToggleShown) + visibleDataColumnCount + Number(!!rowActions)
+    )
 
     return (
         <div
@@ -242,6 +272,7 @@ export function LemonTable<T extends Record<string, any>>({
                 rowRibbonColor !== undefined && `LemonTable--with-ribbon`,
                 stealth && 'LemonTable--stealth',
                 !uppercaseHeader && 'LemonTable--lowercase-header',
+                allowContentScroll && 'h-full min-h-0 overflow-hidden',
                 className
             )}
             // eslint-disable-next-line react/forbid-dom-props
@@ -250,18 +281,23 @@ export function LemonTable<T extends Record<string, any>>({
         >
             <ScrollableShadows
                 innerClassName={hideScrollbar ? 'hide-scrollbar' : undefined}
-                direction="horizontal"
+                direction={allowContentScroll ? undefined : 'horizontal'}
                 scrollRef={scrollRef}
             >
                 <div className="LemonTable__content">
                     <table ref={tableRef}>
                         <colgroup>
-                            {isRowExpansionToggleShown && <col className="w-0" /> /* Expand/collapse column */}
+                            {isRowExpansionToggleShown && <col style={{ width: '1%' }} /> /* Expand/collapse column */}
                             {columns
                                 .filter((column) => !column.isHidden)
                                 .map((column, index) => (
                                     // eslint-disable-next-line react/forbid-dom-props
-                                    <col key={`LemonTable-col-${index}`} style={{ width: column.width }} />
+                                    <col
+                                        key={`LemonTable-col-${index}`}
+                                        // width:0 has no effect in auto-layout tables (ignored by Safari).
+                                        // width:1% is a standard workaround to shrink a column to its content.
+                                        style={{ width: column.width === 0 ? '1%' : column.width }}
+                                    />
                                 ))}
                         </colgroup>
                         {showHeader && (
@@ -349,6 +385,7 @@ export function LemonTable<T extends Record<string, any>>({
 
                                                                           // Check if the click happened on the checkbox input, label, or its specific SVG (LemonCheckbox__box)
                                                                           if (
+                                                                              target.closest('.LemonCheckbox') ||
                                                                               target.classList.contains(
                                                                                   'LemonCheckbox__box'
                                                                               ) ||
@@ -366,7 +403,8 @@ export function LemonTable<T extends Record<string, any>>({
                                                                           const nextSorting = getNextSorting(
                                                                               currentSorting,
                                                                               determineColumnKey(column, 'sorting'),
-                                                                              disableSortingCancellation
+                                                                              disableSortingCancellation,
+                                                                              column.defaultSortOrder
                                                                           )
 
                                                                           setLocalSorting(nextSorting)
@@ -423,7 +461,8 @@ export function LemonTable<T extends Record<string, any>>({
                                                                                     const nextSorting = getNextSorting(
                                                                                         currentSorting,
                                                                                         columnKey,
-                                                                                        disableSortingCancellation
+                                                                                        disableSortingCancellation,
+                                                                                        column.defaultSortOrder
                                                                                     )
                                                                                     return `Click to ${
                                                                                         nextSorting
@@ -479,7 +518,11 @@ export function LemonTable<T extends Record<string, any>>({
                                             })
                                     )}
                                     {rowActions && <th className="w-0" />}
-                                    <LemonTableLoader loading={loading} tag="th" />
+                                </tr>
+                                <tr className="LemonTable__loader-row">
+                                    <th colSpan={headerLoaderColSpan} className="LemonTable__loader-host">
+                                        <LemonTableLoader loading={loading} tag="div" />
+                                    </th>
                                 </tr>
                             </thead>
                         )}
@@ -557,11 +600,10 @@ export function LemonTable<T extends Record<string, any>>({
                         </tbody>
                     </table>
                     {footer && <div className="LemonTable__footer">{footer}</div>}
-
-                    <PaginationControl {...paginationState} nouns={nouns} />
-                    <div className="LemonTable__overlay" />
                 </div>
             </ScrollableShadows>
+            <PaginationControl {...paginationState} nouns={nouns} />
+            <div className="LemonTable__overlay" />
         </div>
     )
 }

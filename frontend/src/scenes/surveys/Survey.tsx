@@ -1,5 +1,6 @@
 import { BindLogic, useActions, useValues } from 'kea'
 import { Form } from 'kea-forms'
+import { router } from 'kea-router'
 import { useEffect } from 'react'
 
 import { LemonDivider, LemonTag, Link, lemonToast } from '@posthog/lemon-ui'
@@ -7,17 +8,19 @@ import { LemonDivider, LemonTag, Link, lemonToast } from '@posthog/lemon-ui'
 import { FlagSelector } from 'lib/components/FlagSelector'
 import { NotFound } from 'lib/components/NotFound'
 import { LemonSkeleton } from 'lib/lemon-ui/LemonSkeleton'
-import { FeatureFlagReleaseConditions } from 'scenes/feature-flags/FeatureFlagReleaseConditions'
 import { featureFlagLogic } from 'scenes/feature-flags/featureFlagLogic'
+import { FeatureFlagReleaseConditions } from 'scenes/feature-flags/FeatureFlagReleaseConditions'
+import { useMaxTool } from 'scenes/max/useMaxTool'
 import { SceneExport } from 'scenes/sceneTypes'
 import { urls } from 'scenes/urls'
 
 import { FeatureFlagFilters, Survey, SurveyMatchType } from '~/types'
 
-import SurveyEdit from './SurveyEdit'
-import { SurveyView } from './SurveyView'
 import { LOADING_SURVEY_RESULTS_TOAST_ID, NewSurvey, SurveyMatchTypeLabels } from './constants'
+import SurveyEdit from './SurveyEdit'
 import { SurveyLogicProps, surveyLogic } from './surveyLogic'
+import { surveysLogic } from './surveysLogic'
+import { SurveyView } from './SurveyView'
 
 export const scene: SceneExport<SurveyLogicProps> = {
     component: SurveyComponent,
@@ -26,8 +29,29 @@ export const scene: SceneExport<SurveyLogicProps> = {
 }
 
 export function SurveyComponent({ id }: SurveyLogicProps): JSX.Element {
-    const { editingSurvey, setSelectedPageIndex } = useActions(surveyLogic)
+    const { editingSurvey, setSelectedPageIndex, loadSurvey } = useActions(surveyLogic)
     const { isEditingSurvey, surveyMissing } = useValues(surveyLogic)
+    const { preferredEditor } = useValues(surveysLogic)
+
+    // register tool so edits from AI will always reload the survey data on-page
+    useMaxTool({
+        identifier: 'edit_survey',
+        active: !!id && id !== 'new',
+        callback: (toolOutput: { survey_id?: string; error?: string }) => {
+            if (!toolOutput?.error && toolOutput?.survey_id === id) {
+                loadSurvey()
+            }
+        },
+    })
+
+    // Redirect to the guided wizard if that's the user's persisted preference.
+    // Only for brand-new surveys without a hash (deep links with hash params
+    // like #fromTemplate or #preserveLocalChanges should be respected).
+    useEffect(() => {
+        if (id === 'new' && preferredEditor === 'guided' && !window.location.hash) {
+            router.actions.replace(urls.surveyWizard('new'))
+        }
+    }, [id, preferredEditor])
 
     /**
      * Logic that cleans up surveyLogic state when the component unmounts.
@@ -45,16 +69,14 @@ export function SurveyComponent({ id }: SurveyLogicProps): JSX.Element {
         return <NotFound object="survey" />
     }
 
+    if (!id) {
+        return <LemonSkeleton />
+    }
+
     return (
-        <div>
-            {!id ? (
-                <LemonSkeleton />
-            ) : (
-                <BindLogic logic={surveyLogic} props={{ id }}>
-                    {isEditingSurvey ? <SurveyForm id={id} /> : <SurveyView id={id} />}
-                </BindLogic>
-            )}
-        </div>
+        <BindLogic logic={surveyLogic} props={{ id }}>
+            {isEditingSurvey ? <SurveyForm id={id} /> : <SurveyView id={id} />}
+        </BindLogic>
     )
 }
 

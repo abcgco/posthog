@@ -4,13 +4,14 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 import structlog
+import posthoganalytics
 import temporalio.activity
 
 from posthog.temporal.ingestion_acceptance_test.client import PostHogClient
 from posthog.temporal.ingestion_acceptance_test.config import Config
 from posthog.temporal.ingestion_acceptance_test.results import TestSuiteResult
-from posthog.temporal.ingestion_acceptance_test.runner import run_tests
-from posthog.temporal.ingestion_acceptance_test.slack import send_slack_notification
+from posthog.temporal.ingestion_acceptance_test.runner import RunningTests, run_tests
+from posthog.temporal.ingestion_acceptance_test.slack import send_slack_notification, send_slack_timeout_notification
 from posthog.temporal.ingestion_acceptance_test.test_cases_discovery import discover_tests
 
 logger = structlog.get_logger(__name__)
@@ -25,8 +26,9 @@ async def run_ingestion_acceptance_tests() -> dict:
     - INGESTION_ACCEPTANCE_TEST_PROJECT_API_KEY
     - INGESTION_ACCEPTANCE_TEST_PROJECT_ID
     - INGESTION_ACCEPTANCE_TEST_PERSONAL_API_KEY
-    - INGESTION_ACCEPTANCE_TEST_EVENT_TIMEOUT_SECONDS (optional, default 30)
-    - INGESTION_ACCEPTANCE_TEST_POLL_INTERVAL_SECONDS (optional, default 2.0)
+    - INGESTION_ACCEPTANCE_TEST_EVENT_TIMEOUT_SECONDS (optional, default 3600)
+    - INGESTION_ACCEPTANCE_TEST_POLL_INTERVAL_SECONDS (optional, default 10.0)
+    - INGESTION_ACCEPTANCE_TEST_ACTIVITY_TIMEOUT_SECONDS (optional, default 3600)
     - INGESTION_ACCEPTANCE_TEST_SLACK_WEBHOOK_URL (optional, for Slack notifications)
 
     Returns:
@@ -36,10 +38,32 @@ async def run_ingestion_acceptance_tests() -> dict:
     logger.info("Starting ingestion acceptance tests")
 
     config = Config()
+
+    logger.info(
+        "Loaded config",
+        api_host=config.api_host,
+        project_id=config.project_id,
+    )
+
+    posthog_sdk = posthoganalytics.Posthog(
+        config.project_api_key,
+        host=config.api_host,
+        debug=True,
+        sync_mode=True,
+    )
+
     tests = discover_tests()
-    client = PostHogClient(config)
-    with ThreadPoolExecutor() as executor:
-        result: TestSuiteResult = await asyncio.to_thread(run_tests, config, tests, client, executor)
+    client = PostHogClient(config, posthog_sdk)
+    running_tests = RunningTests()
+    try:
+        with ThreadPoolExecutor() as executor:
+            result: TestSuiteResult = await asyncio.wait_for(
+                asyncio.to_thread(run_tests, config, tests, client, executor, running_tests),
+                timeout=config.activity_timeout_seconds,
+            )
+    except TimeoutError:
+        send_slack_timeout_notification(config, running_tests=running_tests.snapshot())
+        raise
 
     logger.info(
         "Ingestion acceptance tests completed",

@@ -1,16 +1,20 @@
 import './MarketingAnalyticsTableStyleOverride.scss'
 
 import { BuiltLogic, LogicWrapper, useActions, useValues } from 'kea'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 
-import { IconGear } from '@posthog/icons'
-import { LemonButton } from '@posthog/lemon-ui'
+import { IconGear, IconInfo } from '@posthog/icons'
+import { LemonButton, LemonInput, Tooltip } from '@posthog/lemon-ui'
 
-import { Query } from '~/queries/Query/Query'
+import { useFeatureFlag } from 'lib/hooks/useFeatureFlag'
+import { LemonSegmentedButton } from 'lib/lemon-ui/LemonSegmentedButton'
+
 import { ColumnFeature } from '~/queries/nodes/DataTable/DataTable'
+import { Query } from '~/queries/Query/Query'
 import {
     DataTableNode,
-    MarketingAnalyticsColumnsSchemaNames,
+    MARKETING_ANALYTICS_DRILL_DOWN_CONFIG,
+    MarketingAnalyticsDrillDownLevel,
     MarketingAnalyticsTableQuery,
 } from '~/queries/schema/schema-general'
 import { QueryContext, QueryContextColumn } from '~/queries/types'
@@ -20,6 +24,7 @@ import { InsightLogicProps } from '~/types'
 import { marketingAnalyticsLogic } from '../../logic/marketingAnalyticsLogic'
 import { marketingAnalyticsSettingsLogic } from '../../logic/marketingAnalyticsSettingsLogic'
 import { marketingAnalyticsTableLogic } from '../../logic/marketingAnalyticsTableLogic'
+import { rowMatchesSearch } from '../../logic/utils'
 import { MarketingAnalyticsCell } from '../../shared'
 import {
     MarketingAnalyticsValidationWarningBanner,
@@ -39,42 +44,79 @@ export const MarketingAnalyticsTable = ({
     attachTo,
 }: MarketingAnalyticsTableProps): JSX.Element => {
     const { setQuery } = useActions(marketingAnalyticsTableLogic)
-    const { showColumnConfigModal } = useActions(marketingAnalyticsLogic)
+    const { showColumnConfigModal, setDrillDownLevel } = useActions(marketingAnalyticsLogic)
+    const { drillDownLevel } = useValues(marketingAnalyticsLogic)
+    const hasDrillDown = useFeatureFlag('MARKETING_ANALYTICS_DRILL_DOWN')
     const { conversion_goals } = useValues(marketingAnalyticsSettingsLogic)
+
+    const [searchTerm, setSearchTerm] = useState('')
 
     const validationWarnings = useMemo(() => validateConversionGoals(conversion_goals), [conversion_goals])
 
-    const marketingAnalyticsContext: QueryContext = {
-        ...webAnalyticsDataTableQueryContext,
-        insightProps,
-        columnFeatures: [ColumnFeature.canSort, ColumnFeature.canRemove, ColumnFeature.canPin],
-        columns: (query.source as MarketingAnalyticsTableQuery).select?.reduce(
-            (acc, column) => {
-                acc[column] = {
-                    title: column,
-                    render: (props) => (
-                        <MarketingAnalyticsCell
-                            {...props}
-                            style={{
-                                maxWidth:
-                                    column.toLocaleLowerCase() ===
-                                    MarketingAnalyticsColumnsSchemaNames.Campaign.toLocaleLowerCase()
-                                        ? '200px'
-                                        : undefined,
-                            }}
-                        />
-                    ),
+    const marketingAnalyticsContext: QueryContext = useMemo(
+        () => ({
+            ...webAnalyticsDataTableQueryContext,
+            insightProps,
+            columnFeatures: [ColumnFeature.canSort, ColumnFeature.canRemove, ColumnFeature.canPin],
+            rowProps: (record: unknown) => {
+                if (!rowMatchesSearch(record, searchTerm)) {
+                    return { style: { display: 'none' } }
                 }
-                return acc
+                return {}
             },
-            {} as Record<string, QueryContextColumn>
-        ),
-    }
+            columns: (query.source as MarketingAnalyticsTableQuery).select?.reduce(
+                (acc, column) => {
+                    const allGroupingAliases = Object.values(MARKETING_ANALYTICS_DRILL_DOWN_CONFIG).map(
+                        (c) => c.columnAlias
+                    )
+                    const isGroupingColumn = allGroupingAliases.includes(column)
+                    acc[column] = {
+                        render: (props) => (
+                            <MarketingAnalyticsCell
+                                {...props}
+                                style={{
+                                    maxWidth: isGroupingColumn ? '200px' : undefined,
+                                }}
+                            />
+                        ),
+                    }
+                    return acc
+                },
+                {} as Record<string, QueryContextColumn>
+            ),
+        }),
+        [insightProps, query.source, searchTerm]
+    )
 
     return (
         <div className="bg-surface-primary">
             <div className="p-4 border-b border-border bg-bg-light">
-                <div className="flex gap-4 justify-end">
+                <div className="flex gap-4 justify-between items-center">
+                    <div className="flex items-center gap-2">
+                        <LemonInput
+                            type="search"
+                            placeholder="Search..."
+                            value={searchTerm}
+                            onChange={setSearchTerm}
+                            className="w-64"
+                            data-attr="marketing-analytics-search"
+                        />
+                        {hasDrillDown && (
+                            <LemonSegmentedButton
+                                value={drillDownLevel}
+                                onChange={setDrillDownLevel}
+                                options={[
+                                    { value: MarketingAnalyticsDrillDownLevel.Channel, label: 'Channel' },
+                                    { value: MarketingAnalyticsDrillDownLevel.Source, label: 'Source' },
+                                    { value: MarketingAnalyticsDrillDownLevel.Campaign, label: 'Campaign' },
+                                ]}
+                                size="small"
+                            />
+                        )}
+                        <Tooltip title="Filters the currently loaded results" delayMs={0}>
+                            <IconInfo className="text-xl text-secondary" />
+                        </Tooltip>
+                    </div>
                     <LemonButton type="secondary" icon={<IconGear />} onClick={showColumnConfigModal}>
                         Configure columns
                     </LemonButton>

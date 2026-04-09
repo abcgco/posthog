@@ -5,6 +5,7 @@ import { actionToUrl, router, urlToAction } from 'kea-router'
 import api from 'lib/api'
 import { lemonToast } from 'lib/lemon-ui/LemonToast/LemonToast'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
+import { eventUsageLogic } from 'lib/utils/eventUsageLogic'
 import { MathAvailability } from 'scenes/insights/filters/ActionFilter/ActionFilterRow/ActionFilterRow'
 import { teamLogic } from 'scenes/teamLogic'
 import { urls } from 'scenes/urls'
@@ -103,7 +104,7 @@ export const newDashboardLogic = kea<newDashboardLogicType>([
     key(({ featureFlagId }) => featureFlagId ?? 'new'),
     path(['scenes', 'dashboard', 'newDashboardLogic']),
     connect(() => ({
-        logic: [dashboardsModel],
+        logic: [dashboardsModel, eventUsageLogic],
         values: [featureFlagLogic, ['featureFlags']],
     })),
     actions({
@@ -114,6 +115,7 @@ export const newDashboardLogic = kea<newDashboardLogicType>([
         addDashboard: (form: Partial<NewDashboardForm>) => ({ form }),
         setActiveDashboardTemplate: (template: DashboardTemplateType) => ({ template }),
         clearActiveDashboardTemplate: true,
+        setRedirectAfterCreation: (redirect: boolean) => ({ redirect }),
         createDashboardFromTemplate: (
             template: DashboardTemplateType,
             variables: DashboardTemplateVariableType[],
@@ -163,8 +165,15 @@ export const newDashboardLogic = kea<newDashboardLogicType>([
                 clearActiveDashboardTemplate: () => null,
             },
         ],
+        redirectAfterCreation: [
+            true,
+            {
+                setRedirectAfterCreation: (_, { redirect }) => redirect,
+                showNewDashboardModal: () => true,
+            },
+        ],
     }),
-    forms(({ actions, props }) => ({
+    forms(({ actions, props, values }) => ({
         newDashboard: {
             defaults: defaultFormValues,
             errors: ({ name }) => ({
@@ -188,7 +197,7 @@ export const newDashboardLogic = kea<newDashboardLogicType>([
                     const queryBasedDashboard = getQueryBasedDashboard(result)
                     queryBasedDashboard && dashboardsModel.actions.addDashboardSuccess(queryBasedDashboard)
                     actions.submitNewDashboardSuccessWithResult(result)
-                    if (show) {
+                    if (show && values.redirectAfterCreation) {
                         breakpoint()
                         router.actions.push(urls.dashboard(result.id))
                     }
@@ -246,6 +255,14 @@ export const newDashboardLogic = kea<newDashboardLogicType>([
                 const queryBasedDashboard = getQueryBasedDashboard(result)
                 queryBasedDashboard && dashboardsModel.actions.addDashboardSuccess(queryBasedDashboard)
                 actions.submitNewDashboardSuccessWithResult(result, variables)
+
+                eventUsageLogic.actions.reportWebDashboardCreatedFromTemplate({
+                    dashboard_id: result.id,
+                    template_id: template.id,
+                    template_name: template.template_name,
+                    template_variable_count: variables.length,
+                })
+
                 if (redirectAfterCreation) {
                     router.actions.push(urls.dashboard(result.id))
                 }

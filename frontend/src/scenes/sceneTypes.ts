@@ -10,6 +10,7 @@ export enum Scene {
     Action = 'Action',
     Actions = 'Actions',
     AdvancedActivityLogs = 'AdvancedActivityLogs',
+    AgenticAuthorize = 'AgenticAuthorize',
     Annotations = 'Annotations',
     Approval = 'Approval',
     AsyncMigrations = 'AsyncMigrations',
@@ -20,6 +21,7 @@ export enum Scene {
     BillingSection = 'BillingSection',
     Canvas = 'Canvas',
     CLIAuthorize = 'CLIAuthorize',
+    CLILive = 'CLILive',
     Cohort = 'Cohort',
     CohortCalculationHistory = 'CohortCalculationHistory',
     Cohorts = 'Cohorts',
@@ -27,16 +29,17 @@ export enum Scene {
     CustomCss = 'CustomCss',
     CustomerAnalytics = 'CustomerAnalytics',
     CustomerAnalyticsConfiguration = 'CustomerAnalyticsConfiguration',
+    CustomerJourneyBuilder = 'CustomerJourneyBuilder',
     Dashboard = 'Dashboard',
     Dashboards = 'Dashboards',
     DataManagement = 'DataManagement',
-    DataPipelines = 'DataPipelines',
     DataPipelinesNew = 'DataPipelinesNew',
-    DataWarehouse = 'DataWarehouse',
+    DataOps = 'DataOps',
     DataWarehouseRedirect = 'DataWarehouseRedirect',
     DataWarehouseSource = 'DataWarehouseSource',
     DataWarehouseSourceNew = 'DataWarehouseSourceNew',
     DeadLetterQueue = 'DeadLetterQueue',
+    Destinations = 'Destinations',
     DebugHog = 'DebugHog',
     DebugQuery = 'DebugQuery',
     EarlyAccessFeatures = 'EarlyAccessFeatures',
@@ -53,6 +56,7 @@ export enum Scene {
     EventDefinitionEdit = 'EventDefinitionEdit',
     Experiment = 'Experiment',
     Experiments = 'Experiments',
+    Exports = 'Exports',
     ExperimentsSharedMetric = 'ExperimentsSharedMetric',
     ExperimentsSharedMetrics = 'ExperimentsSharedMetrics',
     ExploreEvents = 'ExploreEvents',
@@ -65,6 +69,7 @@ export enum Scene {
     GroupsNew = 'GroupsNew',
     Heatmaps = 'Heatmaps',
     Heatmap = 'Heatmap',
+    Inbox = 'Inbox',
     HeatmapNew = 'HeatmapNew',
     HeatmapRecording = 'HeatmapRecording',
     HogFunction = 'HogFunction',
@@ -84,6 +89,8 @@ export enum Scene {
     EmailMFAVerify = 'EmailMFAVerify',
     MaterializedColumns = 'MaterializedColumns',
     Max = 'Max',
+    Models = 'Models',
+    NodeDetail = 'NodeDetail',
     MoveToPostHogCloud = 'MoveToPostHogCloud',
     NewTab = 'NewTab',
     Notebook = 'Notebook',
@@ -99,6 +106,7 @@ export enum Scene {
     Person = 'Person',
     Persons = 'Persons',
     Pipeline = 'Pipeline',
+    PipelineStatus = 'PipelineStatus',
     PipelineNode = 'PipelineNode',
     PipelineNodeNew = 'PipelineNodeNew',
     PreflightCheck = 'PreflightCheck',
@@ -115,9 +123,14 @@ export enum Scene {
     ReplaySettings = 'ReplaySettings',
     ReplaySingle = 'ReplaySingle',
     ReplayKiosk = 'ReplayKiosk',
+    ResourceTransfer = 'ResourceTransfer',
     RevenueAnalytics = 'RevenueAnalytics',
+    SqlVariableEdit = 'SqlVariableEdit',
     SQLEditor = 'SQLEditor',
     SavedInsights = 'SavedInsights',
+    Health = 'Health',
+    HealthCategoryDetail = 'HealthCategoryDetail',
+    SdkDoctor = 'SdkDoctor',
     SessionAttributionExplorer = 'SessionAttributionExplorer',
     SessionGroupSummariesTable = 'SessionGroupSummariesTable',
     SessionGroupSummary = 'SessionGroupSummary',
@@ -127,16 +140,21 @@ export enum Scene {
     Signup = 'Signup',
     Site = 'Site',
     Coupons = 'Coupons',
+    Sources = 'Sources',
     StartupProgram = 'StartupProgram',
     Survey = 'Survey',
-    SurveyTemplates = 'SurveyTemplates',
     SurveyWizard = 'SurveyWizard',
+    SurveyFormBuilder = 'SurveyFormBuilder',
     Surveys = 'Surveys',
     SystemStatus = 'SystemStatus',
     ToolbarLaunch = 'ToolbarLaunch',
+    Tracing = 'Tracing',
+    Metrics = 'Metrics',
+    Transformations = 'Transformations',
     Unsubscribe = 'Unsubscribe',
     UserInterview = 'UserInterview',
     UserInterviews = 'UserInterviews',
+    VercelConnect = 'VercelConnect',
     VercelLinkError = 'VercelLinkError',
     VerifyEmail = 'VerifyEmail',
     WebAnalytics = 'WebAnalytics',
@@ -145,6 +163,7 @@ export enum Scene {
     WebAnalyticsWebVitals = 'WebAnalyticsWebVitals',
     WebAnalyticsHealth = 'WebAnalyticsHealth',
     WebAnalyticsLive = 'WebAnalyticsLive',
+    WebScripts = 'WebScripts',
     Endpoints = 'Endpoints',
     Endpoint = 'Endpoint',
     Workflow = 'Workflow',
@@ -170,6 +189,7 @@ export enum Scene {
     TaskDetail = 'TaskDetail',
     TaskTracker = 'TaskTracker',
     OrganizationDeactivated = 'OrganizationDeactivated',
+    CustomerJourneyTemplates = 'CustomerJourneyTemplates',
 }
 
 export type SceneComponent<T> = (props: T) => JSX.Element | null
@@ -206,6 +226,8 @@ export interface SceneTab {
     customTitle?: string
     iconType: FileSystemIconType | 'loading' | 'blank'
     pinned?: boolean
+    /** Show a small badge indicator on the tab icon */
+    badge?: boolean
 
     sceneId?: string
     sceneKey?: string
@@ -311,7 +333,6 @@ export const sceneToAccessControlResourceType: Partial<Record<Scene, AccessContr
     // Surveys
     [Scene.Survey]: AccessControlResourceType.Survey,
     [Scene.Surveys]: AccessControlResourceType.Survey,
-    [Scene.SurveyTemplates]: AccessControlResourceType.Survey,
 
     // Product Tours
     [Scene.ProductTour]: AccessControlResourceType.ProductTour,
@@ -320,6 +341,20 @@ export const sceneToAccessControlResourceType: Partial<Record<Scene, AccessContr
     // Experiments
     [Scene.Experiment]: AccessControlResourceType.Experiment,
     [Scene.Experiments]: AccessControlResourceType.Experiment,
+
+    // Customer analytics (only journey scenes — configuration uses project-level admin)
+    [Scene.CustomerJourneyBuilder]: AccessControlResourceType.CustomerAnalytics,
+    [Scene.CustomerJourneyTemplates]: AccessControlResourceType.CustomerAnalytics,
+
+    // LLM Analytics
+    [Scene.LLMAnalytics]: AccessControlResourceType.LlmAnalytics,
+    [Scene.LLMAnalyticsDataset]: AccessControlResourceType.LlmAnalytics,
+    [Scene.LLMAnalyticsDatasets]: AccessControlResourceType.LlmAnalytics,
+    [Scene.LLMAnalyticsEvaluation]: AccessControlResourceType.LlmAnalytics,
+    [Scene.LLMAnalyticsEvaluations]: AccessControlResourceType.LlmAnalytics,
+    [Scene.LLMAnalyticsPlayground]: AccessControlResourceType.LlmAnalytics,
+    [Scene.LLMAnalyticsTrace]: AccessControlResourceType.LlmAnalytics,
+    [Scene.LLMAnalyticsUsers]: AccessControlResourceType.LlmAnalytics,
 
     // Data warehouse sources - not included here because self-managed sources don't have access control.
     // Managed sources handle access control at the logic level via SIDE_PANEL_CONTEXT_KEY.

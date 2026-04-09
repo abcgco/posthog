@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import polars as pl
@@ -7,6 +8,7 @@ from dagster import AssetKey, JsonMetadataValue, MetadataValue
 from posthog.hogql.constants import LimitContext
 from posthog.hogql.query import execute_hogql_query
 
+from posthog.clickhouse.query_tagging import Feature, Product, tag_queries
 from posthog.dags.common import JobOwners
 from posthog.dags.common.resources import ClayWebhookResource
 from posthog.dags.common.utils import compute_dataframe_hashes
@@ -23,25 +25,25 @@ TRUNCATABLE_FIELDS = [
     "removal_timestamps",
     "removal_types",
     "source_type",
-    "organization_names",
-    "organization_ids",
     "emails",
+    "contacts",
 ]
 
 # Column definitions matching JobSwitchers_v3 schema
 COLUMNS = [
+    "bounce_count",
+    "bounce_reasons",
+    "contacts",
     "email_domain",
     "emails",
-    "bounce_count",
     "first_bounce_at",
     "last_bounce_at",
-    "subjects",
-    "bounce_reasons",
-    "organization_ids",
-    "organization_names",
+    "organization_id",
+    "organization_name",
     "removal_timestamps",
     "removal_types",
     "source_type",
+    "subjects",
 ]
 
 
@@ -69,17 +71,25 @@ def dataframe_to_clay_payload(df: pl.DataFrame) -> list[dict[str, Any]]:
     """Convert DataFrame to Clay webhook payload format."""
     payload = []
     for row in df.to_dicts():
+        contacts_raw = row.get("contacts") or []
+        if isinstance(contacts_raw, str):
+            try:
+                contacts_raw = json.loads(contacts_raw) if contacts_raw else []
+            except json.JSONDecodeError:
+                contacts_raw = []
+
         payload.append(
             {
                 "domain": row["email_domain"],
                 "emails": row.get("emails", []) or [],
+                "contacts": contacts_raw,
                 "bounce_count": row.get("bounce_count", 0),
-                "first_bounce_at": (row["first_bounce_at"].isoformat() if row["first_bounce_at"] else None),
-                "last_bounce_at": (row["last_bounce_at"].isoformat() if row["last_bounce_at"] else None),
+                "first_bounce_at": (row["first_bounce_at"].isoformat() if row.get("first_bounce_at") else None),
+                "last_bounce_at": (row["last_bounce_at"].isoformat() if row.get("last_bounce_at") else None),
                 "subjects": row.get("subjects", []) or [],
                 "bounce_reasons": row.get("bounce_reasons", []) or [],
-                "organization_ids": row.get("organization_ids", []) or [],
-                "organization_names": row.get("organization_names", []) or [],
+                "organization_id": row.get("organization_id", "") or "",
+                "organization_name": row.get("organization_name", "") or "",
                 "removal_timestamps": row.get("removal_timestamps", []) or [],
                 "removal_types": row.get("removal_types", []) or [],
                 "source_type": row.get("source_type", []) or [],
@@ -127,6 +137,7 @@ def job_switchers_to_clay(
     context.log.info("Querying JobSwitchers_v3 saved query")
 
     team = Team.objects.get(id=JOB_SWITCHERS_TEAM_ID)
+    tag_queries(product=Product.BILLING, feature=Feature.BILLING_ETL)
     query = f"""
         SELECT {", ".join(COLUMNS)}
         FROM JobSwitchers_v3

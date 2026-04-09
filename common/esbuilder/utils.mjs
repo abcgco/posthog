@@ -82,6 +82,7 @@ export function copyIndexHtml(
     const cssFile =
         relativeFiles.length > 0 ? relativeFiles.find((e) => e.endsWith('.css')) : `${entry}.css?t=${buildId}`
 
+    const jsFileFallback = `${entry}.js`
     const scriptCode = `
         window.ESBUILD_LOAD_SCRIPT = async function (file) {
             try {
@@ -89,6 +90,9 @@ export function copyIndexHtml(
             } catch (error) {
                 console.error('Error loading chunk: "' + file + '"')
                 console.error(error)
+                if (file === ${JSON.stringify(jsFile)} && file !== ${JSON.stringify(jsFileFallback)}) {
+                    await import((window.JS_URL || '') + '/static/' + ${JSON.stringify(jsFileFallback)})
+                }
             }
         }
         window.ESBUILD_LOAD_SCRIPT(${JSON.stringify(jsFile)})
@@ -176,6 +180,22 @@ export const commonConfig = {
     // no hashes in dev mode for faster reloads --> we save the old hash in index.html otherwise
     entryNames: isDev ? '[dir]/[name]' : '[dir]/[name]-[hash]',
     plugins: [
+        // monaco-vim imports monaco-editor internals without .js extensions (e.g. monaco-editor/esm/vs/editor/editor.api)
+        // which esbuild can't resolve through monaco-editor's package.json exports map
+        {
+            name: 'resolve-monaco-esm',
+            setup(build) {
+                build.onResolve({ filter: /^monaco-editor\/esm\// }, (args) => {
+                    if (args.path.endsWith('.js')) {
+                        return
+                    }
+                    return build.resolve(args.path + '.js', {
+                        kind: args.kind,
+                        resolveDir: args.resolveDir,
+                    })
+                })
+            },
+        },
         sassPlugin({
             async transform(source, resolveDir, filePath) {
                 const plugins = [autoprefixer, postcssPresetEnv({ stage: 0 })]
@@ -188,11 +208,23 @@ export const commonConfig = {
         }),
         lessLoader({ javascriptEnabled: true }),
         polyfillNode({
+            globals: {
+                buffer: false,
+                process: true,
+            },
             polyfills: {
-                crypto: true,
+                buffer: false,
+                crypto: false,
+                process: true,
+                stream: false,
             },
         }),
     ],
+    alias: {
+        buffer: 'buffer',
+        crypto: 'crypto-browserify',
+        stream: 'stream-browserify',
+    },
     tsconfig: tsconfigPath,
     define: {
         global: 'globalThis',
@@ -201,6 +233,7 @@ export const commonConfig = {
     loader: {
         '.ttf': 'file',
         '.png': 'file',
+        '.gif': 'file',
         '.svg': 'file',
         '.woff': 'file',
         '.woff2': 'file',

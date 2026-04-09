@@ -46,7 +46,7 @@ export const resourcesAccessControlLogic = kea<resourcesAccessControlLogicType>(
             roleAccessControlLogic,
             ['roles'],
             teamLogic,
-            ['currentTeam'],
+            ['currentProjectId'],
             membersLogic,
             ['sortedMembers'],
             userLogic,
@@ -74,16 +74,19 @@ export const resourcesAccessControlLogic = kea<resourcesAccessControlLogicType>(
             {
                 loadResourceAccessControls: async () => {
                     const response = await api.get<AccessControlResponseType>(
-                        'api/projects/@current/resource_access_controls'
+                        `api/projects/${values.currentProjectId}/resource_access_controls`
                     )
                     return response
                 },
 
                 updateResourceAccessControls: async ({ accessControls }) => {
                     for (const control of accessControls) {
-                        await api.put<AccessControlTypeRole>('api/projects/@current/resource_access_controls', {
-                            ...control,
-                        })
+                        await api.put<AccessControlTypeRole>(
+                            `api/projects/${values.currentProjectId}/resource_access_controls`,
+                            {
+                                ...control,
+                            }
+                        )
                     }
 
                     return values.resourceAccessControls
@@ -278,7 +281,7 @@ export const resourcesAccessControlLogic = kea<resourcesAccessControlLogicType>(
 
         resources: [
             (s) => [s.hasAvailableFeature],
-            (hasAvailableFeature): AccessControlType['resource'][] => {
+            (hasAvailableFeature): APIScopeObject[] => {
                 const allResources = [
                     AccessControlResourceType.Action,
                     AccessControlResourceType.ActivityLog,
@@ -287,9 +290,11 @@ export const resourcesAccessControlLogic = kea<resourcesAccessControlLogicType>(
                     AccessControlResourceType.ExternalDataSource,
                     AccessControlResourceType.FeatureFlag,
                     AccessControlResourceType.Insight,
+                    AccessControlResourceType.LlmAnalytics,
                     AccessControlResourceType.Notebook,
                     AccessControlResourceType.RevenueAnalytics,
                     AccessControlResourceType.SessionRecording,
+                    AccessControlResourceType.ErrorTracking,
                     AccessControlResourceType.Survey,
                     AccessControlResourceType.WebAnalytics,
                 ]

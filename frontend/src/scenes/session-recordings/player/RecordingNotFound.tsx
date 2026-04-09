@@ -24,9 +24,9 @@ export function RecordingNotFound(): JSX.Element {
                     </Link>{' '}
                     for more information.
                     {currentTeam?.session_recording_opt_in ? (
-                        <LemonBanner type="info" className="mt-4 max-w-xl mx-auto">
+                        <LemonBanner type="success" className="mt-4 max-w-xl mx-auto">
                             <div className="flex justify-between items-center">
-                                <p>Session replay is enabled for this project</p>
+                                <div>Session replay is enabled for this project</div>
                                 <LemonButton
                                     data-attr="recording-404-edit-settings"
                                     type="secondary"
@@ -40,7 +40,7 @@ export function RecordingNotFound(): JSX.Element {
                     ) : (
                         <LemonBanner type="warning" className="mt-4 max-w-xl mx-auto">
                             <div className="flex justify-between items-center">
-                                <p>Session replay is disabled for this project</p>
+                                <div>Session replay is disabled for this project</div>
                                 <LemonButton
                                     data-attr="recording-404-edit-settings"
                                     type="secondary"

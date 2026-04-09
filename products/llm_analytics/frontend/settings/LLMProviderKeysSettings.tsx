@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react'
 import { IconPlus, IconRefresh, IconTrash } from '@posthog/icons'
 import {
     LemonButton,
-    LemonDialog,
     LemonInput,
     LemonModal,
     LemonSelect,
@@ -14,18 +13,26 @@ import {
     Tooltip,
 } from '@posthog/lemon-ui'
 
-import { LemonTableColumns } from 'lib/lemon-ui/LemonTable'
+import { RestrictionScope, useRestrictedArea } from 'lib/components/RestrictedArea'
+import { TeamMembershipLevel } from 'lib/constants'
 import { IconKey } from 'lib/lemon-ui/icons'
+import { LemonCheckbox } from 'lib/lemon-ui/LemonCheckbox'
+import { LemonTableColumns } from 'lib/lemon-ui/LemonTable'
 
-import { TrialUsageMeterDisplay } from './TrialUsageMeter'
+import { LLMProviderIcon, LLM_PROVIDER_SELECT_OPTIONS } from '../LLMProviderIcon'
 import {
+    AlternativeKey,
+    DependentConfigsResponse,
     KeyValidationResult,
     LLMProvider,
     LLMProviderKey,
     LLMProviderKeyState,
     LLM_PROVIDER_LABELS,
+    TrialEvaluation,
     llmProviderKeysLogic,
+    sortProviderKeys,
 } from './llmProviderKeysLogic'
+import { TrialUsageMeterDisplay } from './TrialUsageMeter'
 
 function StateTag({ state, errorMessage }: { state: LLMProviderKeyState; errorMessage: string | null }): JSX.Element {
     const tagProps: { type: 'success' | 'danger' | 'warning' | 'default'; children: string } = {
@@ -82,6 +89,10 @@ function getKeyPlaceholder(provider: LLMProvider): string {
             return 'sk-ant-...'
         case 'gemini':
             return 'Enter your Gemini API key'
+        case 'openrouter':
+            return 'Enter your OpenRouter API key'
+        case 'fireworks':
+            return 'Enter your Fireworks API key'
     }
 }
 
@@ -122,8 +133,8 @@ function KeyValidationStatus({
     )
 }
 
-function AddKeyModal(): JSX.Element {
-    const { newKeyModalOpen, providerKeysLoading, preValidationResult, preValidationResultLoading } =
+function AddKeyModal({ restrictionReason }: { restrictionReason: string | null }): JSX.Element {
+    const { newKeyModalOpen, providerKeysLoading, preValidationResult, preValidationResultLoading, evaluationConfig } =
         useValues(llmProviderKeysLogic)
     const { setNewKeyModalOpen, createProviderKey, preValidateKey, clearPreValidation } =
         useActions(llmProviderKeysLogic)
@@ -156,11 +167,12 @@ function AddKeyModal(): JSX.Element {
                         provider,
                         name,
                         api_key: apiKey,
+                        set_as_active: !evaluationConfig?.active_provider_key,
                     },
                 })
             }
         }
-    }, [pendingSubmit, preValidationResult, preValidationResultLoading, createProviderKey, name, apiKey, provider])
+    }, [pendingSubmit, preValidationResult, preValidationResultLoading, createProviderKey, name, apiKey, provider]) // oxlint-disable-line react-hooks/exhaustive-deps
 
     const handleClose = (): void => {
         setNewKeyModalOpen(false)
@@ -174,6 +186,7 @@ function AddKeyModal(): JSX.Element {
                     provider,
                     name,
                     api_key: apiKey,
+                    set_as_active: !evaluationConfig?.active_provider_key,
                 },
             })
         } else if (apiKey.length > 0) {
@@ -217,6 +230,7 @@ function AddKeyModal(): JSX.Element {
                         onClick={handleSubmit}
                         loading={providerKeysLoading}
                         disabled={!isValid}
+                        disabledReason={restrictionReason}
                     >
                         Add key
                     </LemonButton>
@@ -229,11 +243,7 @@ function AddKeyModal(): JSX.Element {
                     <LemonSelect
                         value={provider}
                         onChange={handleProviderChange}
-                        options={[
-                            { value: 'openai', label: 'OpenAI' },
-                            { value: 'anthropic', label: 'Anthropic' },
-                            { value: 'gemini', label: 'Google Gemini' },
-                        ]}
+                        options={LLM_PROVIDER_SELECT_OPTIONS}
                         className="mt-1"
                         fullWidth
                     />
@@ -273,7 +283,13 @@ function AddKeyModal(): JSX.Element {
     )
 }
 
-function EditKeyModal({ keyToEdit }: { keyToEdit: LLMProviderKey }): JSX.Element {
+function EditKeyModal({
+    keyToEdit,
+    restrictionReason,
+}: {
+    keyToEdit: LLMProviderKey
+    restrictionReason: string | null
+}): JSX.Element {
     const { providerKeysLoading, preValidationResult, preValidationResultLoading } = useValues(llmProviderKeysLogic)
     const { setEditingKey, updateProviderKey, preValidateKey, clearPreValidation } = useActions(llmProviderKeysLogic)
     const [name, setName] = useState(keyToEdit.name)
@@ -326,6 +342,7 @@ function EditKeyModal({ keyToEdit }: { keyToEdit: LLMProviderKey }): JSX.Element
                         onClick={handleSubmit}
                         loading={providerKeysLoading}
                         disabled={!isValid}
+                        disabledReason={restrictionReason}
                     >
                         Save changes
                     </LemonButton>
@@ -335,8 +352,9 @@ function EditKeyModal({ keyToEdit }: { keyToEdit: LLMProviderKey }): JSX.Element
             <div className="space-y-4">
                 <div>
                     <label className="text-sm font-medium">Provider</label>
-                    <div className="mt-1">
-                        <LemonTag type="default">{LLM_PROVIDER_LABELS[keyToEdit.provider]}</LemonTag>
+                    <div className="mt-1 flex items-center gap-1.5">
+                        <LLMProviderIcon provider={keyToEdit.provider} />
+                        <span>{LLM_PROVIDER_LABELS[keyToEdit.provider]}</span>
                     </div>
                 </div>
                 <div>
@@ -371,6 +389,221 @@ function EditKeyModal({ keyToEdit }: { keyToEdit: LLMProviderKey }): JSX.Element
     )
 }
 
+function DeleteKeyModal({
+    keyToDelete,
+    dependentConfigs,
+    dependentConfigsLoading,
+    restrictionReason,
+}: {
+    keyToDelete: LLMProviderKey
+    dependentConfigs: DependentConfigsResponse | null
+    dependentConfigsLoading: boolean
+    restrictionReason: string | null
+}): JSX.Element {
+    const { providerKeysLoading } = useValues(llmProviderKeysLogic)
+    const { setKeyToDelete, confirmDelete } = useActions(llmProviderKeysLogic)
+    const [replacementKeyId, setReplacementKeyId] = useState<string | undefined>(undefined)
+
+    const hasEvaluations = (dependentConfigs?.evaluations.length ?? 0) > 0
+    const hasAlternatives = (dependentConfigs?.alternative_keys.length ?? 0) > 0
+
+    const firstAlternativeKeyId = dependentConfigs?.alternative_keys[0]?.id
+    useEffect(() => {
+        if (hasAlternatives && firstAlternativeKeyId) {
+            setReplacementKeyId(firstAlternativeKeyId)
+        }
+    }, [hasAlternatives, firstAlternativeKeyId])
+
+    const handleClose = (): void => {
+        setKeyToDelete(null)
+    }
+
+    const handleDelete = (): void => {
+        confirmDelete(hasEvaluations && hasAlternatives ? replacementKeyId : undefined)
+    }
+
+    const replacementOptions =
+        dependentConfigs?.alternative_keys.map((key: AlternativeKey) => ({
+            value: key.id,
+            label: key.name,
+        })) ?? []
+
+    return (
+        <LemonModal
+            isOpen
+            onClose={handleClose}
+            title="Delete API key?"
+            width={480}
+            footer={
+                <>
+                    <LemonButton type="secondary" onClick={handleClose}>
+                        Cancel
+                    </LemonButton>
+                    <LemonButton
+                        type="primary"
+                        status="danger"
+                        onClick={handleDelete}
+                        loading={providerKeysLoading}
+                        disabled={dependentConfigsLoading}
+                        disabledReason={restrictionReason}
+                    >
+                        Delete key
+                    </LemonButton>
+                </>
+            }
+        >
+            {dependentConfigsLoading ? (
+                <LemonSkeleton className="h-20" />
+            ) : (
+                <div className="space-y-4">
+                    <p>
+                        Are you sure you want to delete "<strong>{keyToDelete.name}</strong>"? This cannot be undone.
+                    </p>
+
+                    {hasEvaluations && (
+                        <div className="bg-bg-light border rounded p-3">
+                            <p className="font-medium mb-2">
+                                {dependentConfigs!.evaluations.length} evaluation
+                                {dependentConfigs!.evaluations.length === 1 ? '' : 's'} using this key:
+                            </p>
+                            <ul className="list-disc pl-4 text-sm text-muted space-y-1">
+                                {dependentConfigs!.evaluations.map((evaluation) => (
+                                    <li key={evaluation.id}>{evaluation.name}</li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+
+                    {hasEvaluations && hasAlternatives && (
+                        <div>
+                            <label className="text-sm font-medium">Replace with another key</label>
+                            <LemonSelect
+                                value={replacementKeyId}
+                                onChange={setReplacementKeyId}
+                                options={replacementOptions}
+                                className="mt-1"
+                                fullWidth
+                            />
+                            <p className="text-xs text-muted mt-1">
+                                The selected key will be used by evaluations that currently use this key.
+                            </p>
+                        </div>
+                    )}
+
+                    {hasEvaluations && !hasAlternatives && (
+                        <div className="bg-warning-highlight border border-warning rounded p-3">
+                            <p className="text-sm">
+                                <strong>No replacement keys available.</strong> These evaluations will be disabled after
+                                deletion.
+                            </p>
+                        </div>
+                    )}
+                </div>
+            )}
+        </LemonModal>
+    )
+}
+
+function AssignKeyModal(): JSX.Element | null {
+    const { newlyCreatedKey, trialEvaluations, trialEvaluationsLoading } = useValues(llmProviderKeysLogic)
+    const { confirmAssignKey, dismissAssignKey } = useActions(llmProviderKeysLogic)
+
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+    const [enableAfterAssign, setEnableAfterAssign] = useState(true)
+
+    const hasDisabledEvals = trialEvaluations.some((e: TrialEvaluation) => !e.enabled)
+    const isOpen = newlyCreatedKey !== null && !trialEvaluationsLoading && trialEvaluations.length > 0
+
+    // Select all by default when modal opens
+    useEffect(() => {
+        if (isOpen) {
+            setSelectedIds(new Set(trialEvaluations.map((e: TrialEvaluation) => e.id)))
+            setEnableAfterAssign(true)
+        }
+    }, [isOpen]) // oxlint-disable-line react-hooks/exhaustive-deps
+
+    if (!newlyCreatedKey) {
+        return null
+    }
+
+    // If no trial evals found after loading, auto-dismiss
+    if (!trialEvaluationsLoading && trialEvaluations.length === 0) {
+        return null
+    }
+
+    const toggleEval = (id: string): void => {
+        setSelectedIds((prev) => {
+            const next = new Set(prev)
+            if (next.has(id)) {
+                next.delete(id)
+            } else {
+                next.add(id)
+            }
+            return next
+        })
+    }
+
+    const providerLabel = LLM_PROVIDER_LABELS[newlyCreatedKey.provider] || newlyCreatedKey.provider
+
+    return (
+        <LemonModal
+            isOpen={isOpen}
+            onClose={dismissAssignKey}
+            title={`Apply "${newlyCreatedKey.name}" to existing evaluations?`}
+            width={520}
+            footer={
+                <>
+                    <LemonButton type="secondary" onClick={dismissAssignKey}>
+                        Skip
+                    </LemonButton>
+                    <LemonButton
+                        type="primary"
+                        disabled={selectedIds.size === 0}
+                        onClick={() => confirmAssignKey(Array.from(selectedIds), enableAfterAssign && hasDisabledEvals)}
+                    >
+                        Apply key
+                        {selectedIds.size > 0
+                            ? ` to ${selectedIds.size} evaluation${selectedIds.size !== 1 ? 's' : ''}`
+                            : ''}
+                    </LemonButton>
+                </>
+            }
+        >
+            <div className="space-y-3">
+                <p className="text-sm text-muted">
+                    The following evaluations are using {providerLabel} trial credits. Select which ones should use your
+                    new key instead.
+                </p>
+                <div className="border rounded divide-y">
+                    {trialEvaluations.map((evaluation: TrialEvaluation) => (
+                        <label
+                            key={evaluation.id}
+                            className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-bg-light"
+                        >
+                            <LemonCheckbox
+                                checked={selectedIds.has(evaluation.id)}
+                                onChange={() => toggleEval(evaluation.id)}
+                            />
+                            <span className="flex-1 text-sm">{evaluation.name}</span>
+                            {!evaluation.enabled && (
+                                <LemonTag type="default" size="small">
+                                    Disabled
+                                </LemonTag>
+                            )}
+                        </label>
+                    ))}
+                </div>
+                {hasDisabledEvals && (
+                    <label className="flex items-center gap-2 cursor-pointer">
+                        <LemonCheckbox checked={enableAfterAssign} onChange={setEnableAfterAssign} />
+                        <span className="text-sm">Also re-enable disabled evaluations</span>
+                    </label>
+                )}
+            </div>
+        </LemonModal>
+    )
+}
+
 export function LLMProviderKeysSettings(): JSX.Element {
     const {
         providerKeys,
@@ -379,24 +612,15 @@ export function LLMProviderKeysSettings(): JSX.Element {
         evaluationConfigLoading,
         editingKey,
         validatingKeyId,
+        keyToDelete,
+        dependentConfigs,
+        dependentConfigsLoading,
     } = useValues(llmProviderKeysLogic)
-    const { setNewKeyModalOpen, deleteProviderKey, validateProviderKey, setEditingKey } =
-        useActions(llmProviderKeysLogic)
-
-    const handleDelete = (key: LLMProviderKey): void => {
-        LemonDialog.open({
-            title: 'Delete API key?',
-            description: `Are you sure you want to delete "${key.name}"? This cannot be undone.`,
-            primaryButton: {
-                children: 'Delete',
-                status: 'danger',
-                onClick: () => deleteProviderKey({ id: key.id }),
-            },
-            secondaryButton: {
-                children: 'Cancel',
-            },
-        })
-    }
+    const { setNewKeyModalOpen, validateProviderKey, setEditingKey, setKeyToDelete } = useActions(llmProviderKeysLogic)
+    const restrictionReason = useRestrictedArea({
+        scope: RestrictionScope.Project,
+        minimumAccessLevel: TeamMembershipLevel.Admin,
+    })
 
     const columns: LemonTableColumns<LLMProviderKey> = [
         {
@@ -417,7 +641,12 @@ export function LLMProviderKeysSettings(): JSX.Element {
         {
             title: 'Provider',
             key: 'provider',
-            render: (_, key) => <LemonTag type="default">{LLM_PROVIDER_LABELS[key.provider]}</LemonTag>,
+            render: (_, key) => (
+                <div className="flex items-center gap-1.5">
+                    <LLMProviderIcon provider={key.provider} />
+                    <span>{LLM_PROVIDER_LABELS[key.provider]}</span>
+                </div>
+            ),
         },
         {
             title: 'Key',
@@ -452,18 +681,22 @@ export function LLMProviderKeysSettings(): JSX.Element {
             width: 150,
             render: (_, key) => (
                 <div className="flex gap-1">
-                    {key.state !== 'ok' && (
-                        <LemonButton
-                            size="small"
-                            type="secondary"
-                            icon={<IconRefresh />}
-                            loading={validatingKeyId === key.id}
-                            onClick={() => validateProviderKey({ id: key.id })}
-                        >
-                            Validate
-                        </LemonButton>
-                    )}
-                    <LemonButton size="small" type="secondary" onClick={() => setEditingKey(key)}>
+                    <LemonButton
+                        size="small"
+                        type="secondary"
+                        icon={<IconRefresh />}
+                        loading={validatingKeyId === key.id}
+                        onClick={() => validateProviderKey({ id: key.id })}
+                        disabledReason={restrictionReason}
+                    >
+                        Validate
+                    </LemonButton>
+                    <LemonButton
+                        size="small"
+                        type="secondary"
+                        onClick={() => setEditingKey(key)}
+                        disabledReason={restrictionReason}
+                    >
                         Edit
                     </LemonButton>
                     <LemonButton
@@ -471,7 +704,8 @@ export function LLMProviderKeysSettings(): JSX.Element {
                         type="secondary"
                         status="danger"
                         icon={<IconTrash />}
-                        onClick={() => handleDelete(key)}
+                        onClick={() => setKeyToDelete(key)}
+                        disabledReason={restrictionReason}
                     />
                 </div>
             ),
@@ -488,14 +722,12 @@ export function LLMProviderKeysSettings(): JSX.Element {
                 ) : (
                     <>
                         <div className="flex justify-between items-start">
-                            <div>
-                                <h2 className="text-xl font-semibold">API keys</h2>
-                                <p className="text-muted">
-                                    Add your API keys to run evaluations with your own account. Supports OpenAI,
-                                    Anthropic, and Google Gemini.
-                                </p>
-                            </div>
-                            <LemonButton type="primary" icon={<IconPlus />} onClick={() => setNewKeyModalOpen(true)}>
+                            <LemonButton
+                                type="primary"
+                                icon={<IconPlus />}
+                                onClick={() => setNewKeyModalOpen(true)}
+                                disabledReason={restrictionReason}
+                            >
                                 Add API key
                             </LemonButton>
                         </div>
@@ -509,14 +741,15 @@ export function LLMProviderKeysSettings(): JSX.Element {
                                 <IconKey className="text-muted text-4xl mb-4" />
                                 <h3 className="font-semibold mb-2">No API keys configured</h3>
                                 <p className="text-muted mb-4 text-center">
-                                    Add your API key to run evaluations with your own account.
+                                    Add your API key for LLM analytics features with your own account.
                                     <br />
-                                    Supports OpenAI, Anthropic, and Google Gemini.
+                                    Used for evaluations and the playground.
                                 </p>
                                 <LemonButton
                                     type="primary"
                                     icon={<IconPlus />}
                                     onClick={() => setNewKeyModalOpen(true)}
+                                    disabledReason={restrictionReason}
                                 >
                                     Add API key
                                 </LemonButton>
@@ -524,7 +757,7 @@ export function LLMProviderKeysSettings(): JSX.Element {
                         ) : (
                             <LemonTable
                                 columns={columns}
-                                dataSource={providerKeys}
+                                dataSource={sortProviderKeys(providerKeys)}
                                 loading={providerKeysLoading}
                                 rowKey="id"
                             />
@@ -532,8 +765,17 @@ export function LLMProviderKeysSettings(): JSX.Element {
                     </>
                 )}
             </div>
-            <AddKeyModal />
-            {editingKey && <EditKeyModal keyToEdit={editingKey} />}
+            <AddKeyModal restrictionReason={restrictionReason} />
+            <AssignKeyModal />
+            {editingKey && <EditKeyModal keyToEdit={editingKey} restrictionReason={restrictionReason} />}
+            {keyToDelete && (
+                <DeleteKeyModal
+                    keyToDelete={keyToDelete}
+                    dependentConfigs={dependentConfigs}
+                    dependentConfigsLoading={dependentConfigsLoading}
+                    restrictionReason={restrictionReason}
+                />
+            )}
         </>
     )
 }

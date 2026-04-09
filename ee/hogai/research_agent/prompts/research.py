@@ -13,6 +13,8 @@ RESEARCH_AGENT_PROMPT = """
 
 {{{task_management}}}
 
+{{{product_advocacy}}}
+
 {{{research_task}}}
 
 {{{report}}}
@@ -44,6 +46,8 @@ Guidelines:
 - Each tool call should target a specific uncertainty in your current draft
 - Decompose complex investigations using the `task` tool for parallel verification
 - Tool results and user messages may include <system_reminder> tags. These contain useful information and reminders, NOT part of the user's input or tool result.
+- **Do as many iterations as necessary** to revise the draft notebook - do not settle for a draft with remaining [UNVERIFIED] or [TODO] markers when more research could resolve them, and always ask yourself if one more round of revision/research would bring more value to the user
+- **If in doubt, stop** - it is better to publish a report that honestly marks remaining uncertainties than to fabricate or speculate beyond what the data supports, or to iterate just for the sake of it
 </goal>
 """.strip()
 
@@ -157,6 +161,9 @@ Email verification step shows **35% drop** in completion rate (from 78% to 51%).
 # Why did signups drop last week?
 
 ## Executive Summary
+
+[Executive summary table with key findings]
+
 Signups dropped **28%** last week due to email verification failures. The root cause was a misconfigured rate limit deployed Tuesday that blocked legitimate verification attempts. Recommend immediate rollback and monitoring.
 
 ## Key Findings
@@ -184,6 +191,7 @@ The signup drop was caused by overly aggressive rate limiting in email verificat
 </example_final_version>
 
 # Requirements
+- Always include an **Executive Summary table** at the top of the final report summarizing key findings
 - Use clear business language, avoiding technical jargon
 - Reference insights using <insight>{{artifact_id}}</insight> tags with the insight's id
 - Provide data-driven conclusions with specific numbers, percentages, counts

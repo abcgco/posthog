@@ -8,6 +8,7 @@ from django.utils import timezone
 
 import pytest_asyncio
 from asgiref.sync import sync_to_async
+from parameterized import parameterized
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -85,7 +86,9 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
         response_data = response.json()
-        self.assertTrue(response_data["is_materialized"])
+        # is_materialized is derived from saved_query.table_id, which is only set after Temporal runs
+        # At this point, saved_query exists but table_id is not yet set
+        self.assertFalse(response_data["is_materialized"])
 
         # Verify SavedQuery was created on version
         version.refresh_from_db()
@@ -165,6 +168,49 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         saved_query.refresh_from_db()
         self.assertEqual(saved_query.sync_frequency_interval, timedelta(hours=1))
 
+    @parameterized.expand(
+        [
+            ("5min", DataWarehouseSyncInterval.FIELD_5MIN),
+            ("15min", DataWarehouseSyncInterval.FIELD_15MIN),
+        ]
+    )
+    def test_sync_frequency_below_30min_rejected_on_create(self, _name, sync_frequency):
+        response = self.client.post(
+            f"/api/environments/{self.team.id}/endpoints/",
+            {
+                "name": f"test_freq_{_name}",
+                "query": self.sample_hogql_query,
+                "sync_frequency": sync_frequency,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("at least 30 minutes", str(response.json()))
+
+    @parameterized.expand(
+        [
+            ("5min", DataWarehouseSyncInterval.FIELD_5MIN),
+            ("15min", DataWarehouseSyncInterval.FIELD_15MIN),
+        ]
+    )
+    def test_sync_frequency_below_30min_rejected_on_update(self, _name, sync_frequency):
+        endpoint = create_endpoint_with_version(
+            name=f"test_freq_update_{_name}",
+            team=self.team,
+            query=self.sample_hogql_query,
+            created_by=self.user,
+        )
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {
+                "is_materialized": True,
+                "sync_frequency": sync_frequency,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("at least 30 minutes", str(response.json()))
+
     def test_disable_materialization_removes_saved_query(self):
         """Test that disabling materialization removes the SavedQuery."""
         # Create and materialize an endpoint
@@ -209,14 +255,15 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         saved_query = DataWarehouseSavedQuery.objects.get(id=saved_query_id)
         self.assertTrue(saved_query.deleted)
 
-    def test_cannot_materialize_query_with_variables(self):
-        """Test that queries with variables cannot be materialized."""
+    def test_cannot_materialize_query_with_invalid_variables(self):
+        """Test that queries with invalid variable metadata cannot be materialized."""
         endpoint = create_endpoint_with_version(
             name="test_variables",
             team=self.team,
             query={
                 "kind": "HogQLQuery",
                 "query": "SELECT * FROM events WHERE event = {variables.event_name}",
+                # Missing code_name which is required for materialization
                 "variables": {"event_name": {"value": "$pageview"}},
             },
             created_by=self.user,
@@ -232,8 +279,8 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        # The API wraps validation errors in a generic message
-        self.assertIn("Failed to update endpoint", response.json()["detail"])
+        # Should indicate variable metadata issue
+        self.assertIn("Cannot materialize endpoint", response.json()["detail"])
 
     def test_can_materialize_lifecycle_query(self):
         _create_event(
@@ -426,7 +473,8 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         response = self.client.get(f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         response_data = response.json()
-        self.assertTrue(response_data["is_materialized"])
+        # is_materialized is derived from saved_query.table_id — False until Temporal creates the table
+        self.assertFalse(response_data["is_materialized"])
         self.assertIn("materialization", response_data)
         self.assertTrue(response_data["materialization"]["can_materialize"])
         self.assertIn("status", response_data["materialization"])
@@ -449,7 +497,6 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         response_data = response.json()
         self.assertTrue(response_data["can_materialize"])
-        self.assertNotIn("name", response_data)
         self.assertNotIn("query", response_data)
         self.assertNotIn("created_by", response_data)
 
@@ -476,7 +523,6 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         self.assertIn("last_materialized_at", response_data)
         self.assertIn("error", response_data)
         # Verify no other endpoint fields are included
-        self.assertNotIn("name", response_data)
         self.assertNotIn("query", response_data)
         self.assertNotIn("created_by", response_data)
         self.assertNotIn("description", response_data)
@@ -596,7 +642,8 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
                 response.json()["results"], [[2]], "Should return fresh results after query update, not old cache"
             )
 
-    def test_materialized_endpoint_applies_filters_override(self):
+    def test_materialized_endpoint_rejects_filters_override(self):
+        """Test that filters_override is rejected - use variables instead."""
         saved_query = DataWarehouseSavedQuery.objects.create(
             team=self.team,
             name="materialized_filters_endpoint",
@@ -621,28 +668,22 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         # Link saved_query to version
         version = endpoint.versions.first()
         version.saved_query = saved_query
-        version.is_materialized = True
         version.save()
 
-        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
-            response = self.client.post(
-                f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
-                {
-                    "filters_override": {
-                        "properties": [{"type": "event", "key": "$lib", "operator": "exact", "value": "$web"}]
-                    }
-                },
-                format="json",
-            )
+        # filters_override is no longer allowed - should be rejected
+        response = self.client.post(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
+            {
+                "filters_override": {
+                    "properties": [{"type": "event", "key": "$lib", "operator": "exact", "value": "$web"}]
+                }
+            },
+            format="json",
+        )
 
-            self.assertEqual(response.status_code, status.HTTP_200_OK)
-            query_request_data = mock_exec.call_args[0][0]
-            query_payload = query_request_data["query"]
-            query_sql = query_payload["query"].lower()
-
-            self.assertIn("where", query_sql)
-            self.assertIn("$lib", query_sql)
-            self.assertEqual(query_payload["kind"], "HogQLQuery")
+        # Should fail with 400 since filters_override is not allowed for HogQL endpoints
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Not allowed for HogQL endpoints. Use variables instead.", response.json()["detail"])
 
     def test_stale_materialized_data_uses_inline_execution(self):
         """Test that stale materialized data triggers inline execution instead of using cached table."""
@@ -675,7 +716,6 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         # Link saved_query to version
         version = endpoint.versions.first()
         version.saved_query = saved_query
-        version.is_materialized = True
         version.save()
 
         # Mock the execution methods to track which path is taken
@@ -727,7 +767,6 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         # Link saved_query to version
         version = endpoint.versions.first()
         version.saved_query = saved_query
-        version.is_materialized = True
         version.save()
 
         # Mock the execution methods to track which path is taken
@@ -778,7 +817,6 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         # Link saved_query to version
         version = endpoint.versions.first()
         version.saved_query = saved_query
-        version.is_materialized = True
         version.save()
 
         with (
@@ -828,7 +866,6 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         # Link saved_query to version
         version = endpoint.versions.first()
         version.saved_query = saved_query
-        version.is_materialized = True
         version.save()
 
         with (
@@ -868,6 +905,435 @@ class TestEndpointMaterialization(ClickhouseTestMixin, APIBaseTest):
         self.assertIn("direct", response.json()["detail"].lower())
         self.assertIn("materialized", response.json()["detail"].lower())
 
+    def test_materialized_insight_endpoint_with_breakdown_executes_correctly(self):
+        """Test that insight-based endpoints (TrendsQuery) with breakdowns work when materialized.
+
+        This verifies that:
+        1. TrendsQuery is converted to HogQL when materialized
+        2. The saved_query.query contains HogQL, not the original TrendsQuery
+        3. Execution uses saved_query.query (HogQL) instead of version.query (TrendsQuery)
+        """
+        trends_query_with_breakdown = {
+            "kind": "TrendsQuery",
+            "series": [{"kind": "EventsNode", "event": "$pageview", "math": "total"}],
+            "dateRange": {"date_from": "-7d"},
+            "interval": "day",
+            "breakdownFilter": {
+                "breakdown": "$browser",
+                "breakdown_type": "event",
+                "breakdown_limit": 5,
+            },
+        }
+
+        # Create events so the query runner can generate valid HogQL
+        _create_event(team=self.team, event="$pageview", distinct_id="user1")
+        flush_persons_and_events()
+
+        endpoint = create_endpoint_with_version(
+            name="trends_breakdown_materialized",
+            team=self.team,
+            query=trends_query_with_breakdown,
+            created_by=self.user,
+            is_active=True,
+        )
+
+        # Enable materialization
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {
+                "is_materialized": True,
+                "sync_frequency": DataWarehouseSyncInterval.FIELD_12HOUR,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+
+        # Verify the saved_query contains HogQL (not TrendsQuery)
+        version = endpoint.versions.first()
+        version.refresh_from_db()
+        self.assertIsNotNone(version.saved_query)
+        saved_query = version.saved_query
+        assert saved_query is not None
+
+        # The saved_query.query should be HogQL, not TrendsQuery
+        self.assertEqual(saved_query.query["kind"], "HogQLQuery")
+        self.assertIn("query", saved_query.query)
+        # The HogQL should contain the breakdown column
+        hogql_str = saved_query.query["query"].lower()
+        self.assertIn("select", hogql_str)
+        self.assertIn("from", hogql_str)
+
+        # The version.query should still be the original TrendsQuery
+        self.assertEqual(version.query["kind"], "TrendsQuery")
+
+        # Set up the saved_query as completed with a table
+        saved_query.status = DataWarehouseSavedQuery.Status.COMPLETED
+        saved_query.last_run_at = timezone.now()
+        saved_query.table = DataWarehouseTable.objects.create(
+            team=self.team,
+            name="trends_breakdown_materialized",
+            format=DataWarehouseTable.TableFormat.Parquet,
+            url_pattern="s3://test-bucket/trends-breakdown",
+        )
+        saved_query.save()
+
+        # Execute the endpoint and verify it uses the materialized path correctly
+        # Must provide the breakdown variable (required for security - prevents data leakage)
+        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+            response = self.client.post(
+                f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
+                {"variables": {"$browser": "Chrome"}},
+                format="json",
+            )
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            # Verify the query was executed
+            mock_exec.assert_called()
+            # The query should be HogQL selecting from the materialized table
+            query_request_data = mock_exec.call_args[0][0]
+            query_payload = query_request_data["query"]
+            self.assertEqual(query_payload["kind"], "HogQLQuery")
+            query_sql = query_payload["query"].lower()
+            # Should select from the materialized table name
+            self.assertIn("trends_breakdown_materialized", query_sql)
+            # Should filter by the breakdown value using has() for array column
+            self.assertIn("has(breakdown_value", query_sql)
+            self.assertIn("chrome", query_sql)
+
+    def test_materialized_hogql_endpoint_with_variable_executes_correctly(self):
+        """Test that HogQL endpoints with variables work when materialized.
+
+        Flow:
+        1. Create endpoint: SELECT count(), toDate(timestamp) FROM events WHERE event = {variables.event_name} GROUP BY toDate(timestamp)
+        2. Materialize: Query transformed to include event column, remove WHERE
+        3. Execute with variable: Should filter by event column in materialized table
+        """
+        hogql_query_with_variable = {
+            "kind": "HogQLQuery",
+            "query": "SELECT count(), toDate(timestamp) FROM events WHERE event = {variables.event_name} GROUP BY toDate(timestamp)",
+            "variables": {
+                "var-event-123": {
+                    "variableId": "var-event-123",
+                    "code_name": "event_name",
+                    "value": "$pageview",
+                }
+            },
+        }
+
+        # Create events so the query is valid
+        _create_event(team=self.team, event="$pageview", distinct_id="user1")
+        _create_event(team=self.team, event="$click", distinct_id="user1")
+        flush_persons_and_events()
+
+        endpoint = create_endpoint_with_version(
+            name="hogql_variable_materialized",
+            team=self.team,
+            query=hogql_query_with_variable,
+            created_by=self.user,
+            is_active=True,
+        )
+
+        # Enable materialization
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {
+                "is_materialized": True,
+                "sync_frequency": DataWarehouseSyncInterval.FIELD_12HOUR,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+
+        # Verify the saved_query was created and transformed
+        version = endpoint.versions.first()
+        version.refresh_from_db()
+        self.assertIsNotNone(version.saved_query)
+        saved_query = version.saved_query
+        assert saved_query is not None
+
+        # The saved_query.query should be transformed HogQL:
+        # - event_name column added to SELECT
+        # - WHERE clause removed (or simplified)
+        # - GROUP BY includes event_name
+        self.assertEqual(saved_query.query["kind"], "HogQLQuery")
+        transformed_sql = saved_query.query["query"].lower()
+        # Should have event_name in the query (added as column)
+        self.assertIn("event_name", transformed_sql)
+        # Should NOT have the variable placeholder anymore
+        self.assertNotIn("{variables", transformed_sql)
+
+        # Set up the saved_query as completed with a table
+        saved_query.status = DataWarehouseSavedQuery.Status.COMPLETED
+        saved_query.last_run_at = timezone.now()
+        saved_query.table = DataWarehouseTable.objects.create(
+            team=self.team,
+            name="hogql_variable_materialized",
+            format=DataWarehouseTable.TableFormat.Parquet,
+            url_pattern="s3://test-bucket/hogql-variable",
+        )
+        saved_query.save()
+
+        # Execute with variable filter
+        with mock.patch.object(EndpointViewSet, "_execute_query_and_respond", return_value=Response({})) as mock_exec:
+            response = self.client.post(
+                f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/run",
+                {"variables": {"event_name": "$pageview"}},
+                format="json",
+            )
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+            mock_exec.assert_called()
+
+            # Verify the query has the variable filter applied
+            query_request_data = mock_exec.call_args[0][0]
+            query_payload = query_request_data["query"]
+            self.assertEqual(query_payload["kind"], "HogQLQuery")
+            query_sql = query_payload["query"].lower()
+
+            # Should select from the materialized table
+            self.assertIn("hogql_variable_materialized", query_sql)
+            # Should have WHERE clause with event_name filter
+            self.assertIn("where", query_sql)
+            self.assertIn("event_name", query_sql)
+            self.assertIn("$pageview", query_sql)
+
+    @parameterized.expand(
+        [
+            ("completed_hides_stale_error", DataWarehouseSavedQuery.Status.COMPLETED, "Previous error", ""),
+            ("failed_shows_error", DataWarehouseSavedQuery.Status.FAILED, "Query failed", "Query failed"),
+            ("running_shows_error", DataWarehouseSavedQuery.Status.RUNNING, "Previous error", "Previous error"),
+            ("completed_no_error", DataWarehouseSavedQuery.Status.COMPLETED, None, ""),
+        ],
+    )
+    def test_materialization_error_visibility_by_status(self, _name, sq_status, latest_error, expected_error):
+        endpoint = create_endpoint_with_version(
+            name=f"test_error_visibility_{_name}",
+            team=self.team,
+            query=self.sample_hogql_query,
+            created_by=self.user,
+        )
+        self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"is_materialized": True, "sync_frequency": DataWarehouseSyncInterval.FIELD_24HOUR},
+            format="json",
+        )
+        version = endpoint.versions.first()
+        version.refresh_from_db()
+        saved_query = version.saved_query
+        saved_query.status = sq_status
+        saved_query.latest_error = latest_error
+        saved_query.save()
+
+        response = self.client.get(f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["materialization"]["error"], expected_error)
+
+    def test_enable_materialization_creates_dag_node(self):
+        endpoint = create_endpoint_with_version(
+            name="dag_node_endpoint",
+            team=self.team,
+            query=self.sample_hogql_query,
+            created_by=self.user,
+            is_active=True,
+        )
+
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"is_materialized": True, "sync_frequency": DataWarehouseSyncInterval.FIELD_24HOUR},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+
+        from products.data_modeling.backend.models import Node
+
+        version = endpoint.versions.first()
+        version.refresh_from_db()
+        assert version.saved_query is not None
+
+        node = Node.objects.filter(team=self.team, saved_query=version.saved_query).first()
+        self.assertIsNotNone(node)
+
+    def test_disable_materialization_removes_dag_node(self):
+        endpoint = create_endpoint_with_version(
+            name="remove_dag_endpoint",
+            team=self.team,
+            query=self.sample_hogql_query,
+            created_by=self.user,
+            is_active=True,
+        )
+
+        self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"is_materialized": True, "sync_frequency": DataWarehouseSyncInterval.FIELD_24HOUR},
+            format="json",
+        )
+
+        version = endpoint.versions.first()
+        version.refresh_from_db()
+        assert version.saved_query is not None
+        saved_query_id = version.saved_query.id
+
+        from products.data_modeling.backend.models import Node
+
+        self.assertTrue(Node.objects.filter(team=self.team, saved_query_id=saved_query_id).exists())
+
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"is_materialized": False},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+        self.assertFalse(Node.objects.filter(team=self.team, saved_query_id=saved_query_id).exists())
+
+    def test_delete_endpoint_removes_dag_node(self):
+        endpoint = create_endpoint_with_version(
+            name="delete_dag_endpoint",
+            team=self.team,
+            query=self.sample_hogql_query,
+            created_by=self.user,
+            is_active=True,
+        )
+
+        self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"is_materialized": True, "sync_frequency": DataWarehouseSyncInterval.FIELD_24HOUR},
+            format="json",
+        )
+
+        version = endpoint.versions.first()
+        version.refresh_from_db()
+        assert version.saved_query is not None
+        saved_query_id = version.saved_query.id
+
+        from products.data_modeling.backend.models import Node
+
+        self.assertTrue(Node.objects.filter(team=self.team, saved_query_id=saved_query_id).exists())
+
+        response = self.client.delete(f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/")
+
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(Node.objects.filter(team=self.team, saved_query_id=saved_query_id).exists())
+
+    def test_materialization_replaces_breakdown_sentinels_in_hogql(self):
+        from posthog.hogql_queries.insights.trends.breakdown import (
+            BREAKDOWN_NULL_STRING_LABEL,
+            BREAKDOWN_OTHER_STRING_LABEL,
+        )
+
+        trends_query = {
+            "kind": "TrendsQuery",
+            "series": [{"kind": "EventsNode", "event": "$pageview", "math": "total"}],
+            "dateRange": {"date_from": "-7d"},
+            "breakdownFilter": {
+                "breakdown": "$browser",
+                "breakdown_type": "event",
+                "breakdown_limit": 5,
+            },
+        }
+
+        _create_event(team=self.team, event="$pageview", distinct_id="user1")
+        flush_persons_and_events()
+
+        endpoint = create_endpoint_with_version(
+            name="sentinel_mat_test",
+            team=self.team,
+            query=trends_query,
+            created_by=self.user,
+            is_active=True,
+        )
+
+        response = self.client.patch(
+            f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+            {"is_materialized": True, "sync_frequency": DataWarehouseSyncInterval.FIELD_24HOUR},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+
+        version = endpoint.versions.first()
+        version.refresh_from_db()
+        saved_query = version.saved_query
+        assert saved_query is not None
+
+        hogql_text = saved_query.query.get("query", "")
+        self.assertNotIn(BREAKDOWN_NULL_STRING_LABEL, hogql_text)
+        self.assertNotIn(BREAKDOWN_OTHER_STRING_LABEL, hogql_text)
+
+    def test_materialization_failure_after_query_change_returns_success_with_error(self):
+        from products.data_warehouse.backend.models import DataWarehouseTable
+
+        initial_query = {"kind": "HogQLQuery", "query": "SELECT * FROM events LIMIT 10"}
+        endpoint = create_endpoint_with_version(
+            name="mat_fail_test",
+            team=self.team,
+            query=initial_query,
+            created_by=self.user,
+            is_active=True,
+        )
+        version = endpoint.versions.first()
+
+        # Set up materialization on v1
+        saved_query = DataWarehouseSavedQuery.objects.create(
+            name=f"{endpoint.name}_v1",
+            team=self.team,
+            query=initial_query,
+            is_materialized=True,
+            sync_frequency_interval=timedelta(hours=24),
+            origin=DataWarehouseSavedQuery.Origin.ENDPOINT,
+        )
+        table = DataWarehouseTable.objects.create(
+            team=self.team,
+            name=f"{endpoint.name}_v1_table",
+            format=DataWarehouseTable.TableFormat.Parquet,
+            url_pattern=f"s3://test-bucket/{endpoint.name}_v1_table",
+        )
+        saved_query.table = table
+        saved_query.save()
+        version.saved_query = saved_query
+        version.save()
+
+        # Update with a new query — version creation succeeds, but materialization fails
+        new_query = {"kind": "HogQLQuery", "query": "SELECT * FROM events WHERE timestamp > now() - INTERVAL 1 DAY"}
+        with mock.patch.object(
+            EndpointViewSet, "_enable_materialization_inner", side_effect=Exception("Temporal unavailable")
+        ):
+            response = self.client.put(
+                f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+                {"query": new_query},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.json())
+
+        # New version was created despite materialization failure
+        endpoint.refresh_from_db()
+        self.assertEqual(endpoint.current_version, 2)
+
+        # Response includes materialization error
+        self.assertIn("materialization_error", response.json())
+        self.assertIn("Failed to enable materialization", response.json()["materialization_error"])
+
+    def test_materialization_failure_without_query_change_still_raises(self):
+        endpoint = create_endpoint_with_version(
+            name="mat_fail_no_version",
+            team=self.team,
+            query=self.sample_hogql_query,
+            created_by=self.user,
+            is_active=True,
+        )
+
+        with mock.patch.object(
+            EndpointViewSet, "_enable_materialization_inner", side_effect=Exception("Temporal unavailable")
+        ):
+            response = self.client.patch(
+                f"/api/environments/{self.team.id}/endpoints/{endpoint.name}/",
+                {"is_materialized": True, "sync_frequency": DataWarehouseSyncInterval.FIELD_24HOUR},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
 
 @pytest.mark.asyncio
 class TestEndpointMaterializationTemporal:
@@ -895,7 +1361,6 @@ class TestEndpointMaterializationTemporal:
 
         # Link saved_query to version instead of endpoint
         version.saved_query = saved_query
-        version.is_materialized = True
         await sync_to_async(version.save)()
 
         yield endpoint
@@ -911,7 +1376,7 @@ class TestEndpointMaterializationTemporal:
         assert saved_query is not None
 
         # Get the schedule that should be created
-        schedule = get_saved_query_schedule(saved_query)
+        schedule = await sync_to_async(get_saved_query_schedule)(saved_query)
 
         # Verify schedule configuration
         from temporalio.client import ScheduleActionStartWorkflow, ScheduleOverlapPolicy
@@ -920,10 +1385,9 @@ class TestEndpointMaterializationTemporal:
         assert schedule.action.id == str(saved_query.id)
         assert schedule.action.task_queue == DATA_MODELING_TASK_QUEUE
 
-        # Verify schedule interval matches sync_frequency_interval
-        intervals = schedule.spec.intervals
-        assert len(intervals) == 1
-        assert intervals[0].every == timedelta(hours=12)
+        # Verify schedule uses calendar spec (medium interval for 12h)
+        assert len(schedule.spec.calendars) == 1
+        assert schedule.spec.jitter == timedelta(hours=1)
 
         # Verify schedule policy
         assert schedule.policy.overlap == ScheduleOverlapPolicy.SKIP
@@ -937,20 +1401,20 @@ class TestEndpointMaterializationTemporal:
 
         saved_query = await sync_to_async(get_saved_query)(version)
 
-        # Test 1-hour frequency
+        # Test 1-hour frequency (short interval: calendar with minute buckets, 1min jitter)
         saved_query.sync_frequency_interval = timedelta(hours=1)
-        schedule = get_saved_query_schedule(saved_query)
-        assert schedule.spec.intervals[0].every == timedelta(hours=1)
+        schedule = await sync_to_async(get_saved_query_schedule)(saved_query)
+        assert len(schedule.spec.calendars) == 1
         assert schedule.spec.jitter == timedelta(minutes=1)
 
-        # Test 12-hour frequency
+        # Test 12-hour frequency (medium interval: calendar with hour buckets, 1hr jitter)
         saved_query.sync_frequency_interval = timedelta(hours=12)
-        schedule = get_saved_query_schedule(saved_query)
-        assert schedule.spec.intervals[0].every == timedelta(hours=12)
-        assert schedule.spec.jitter == timedelta(minutes=30)
+        schedule = await sync_to_async(get_saved_query_schedule)(saved_query)
+        assert len(schedule.spec.calendars) == 1
+        assert schedule.spec.jitter == timedelta(hours=1)
 
-        # Test 24-hour frequency
+        # Test 24-hour frequency (medium interval: calendar with hour buckets, 1hr jitter)
         saved_query.sync_frequency_interval = timedelta(hours=24)
-        schedule = get_saved_query_schedule(saved_query)
-        assert schedule.spec.intervals[0].every == timedelta(hours=24)
+        schedule = await sync_to_async(get_saved_query_schedule)(saved_query)
+        assert len(schedule.spec.calendars) == 1
         assert schedule.spec.jitter == timedelta(hours=1)
