@@ -1,4 +1,5 @@
 #!/bin/bash
 /compose/wait
 ./bin/migrate
+python manage.py migrate_clickhouse
 ./bin/docker-server
