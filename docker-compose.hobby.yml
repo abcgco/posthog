@@ -19,8 +19,8 @@ services:
         extends:
             file: docker-compose.base.yml
             service: db
+        restart: always
         image: ${DOCKER_REGISTRY_PREFIX:-}postgres:15.12-alpine
-        logging: *default-logging
         volumes:
             - postgres-data:/var/lib/postgresql/data
 
@@ -28,7 +28,7 @@ services:
         extends:
             file: docker-compose.base.yml
             service: redis7
-        logging: *default-logging
+        restart: always
         volumes:
             - redis7-data:/data
 
@@ -40,8 +40,7 @@ services:
         extends:
             file: docker-compose.base.yml
             service: clickhouse
-        restart: on-failure
-        logging: *default-logging
+        restart: always
         depends_on:
             - kafka
             - zookeeper
@@ -59,7 +58,10 @@ services:
         extends:
             file: docker-compose.base.yml
             service: zookeeper
-        logging: *default-logging
+        restart: always
+        environment:
+            ZOO_AUTOPURGE_PURGEINTERVAL: 1
+            ZOO_AUTOPURGE_SNAPRETAINCOUNT: 3
         volumes:
             - zookeeper-datalog:/datalog
             - zookeeper-data:/data
@@ -68,7 +70,7 @@ services:
         extends:
             file: docker-compose.base.yml
             service: kafka
-        logging: *default-logging
+        restart: always
         depends_on:
             - zookeeper
         environment:
@@ -82,14 +84,12 @@ services:
         extends:
             file: docker-compose.base.yml
             service: worker
-        logging: *default-logging
         environment:
             SITE_URL: https://$DOMAIN
             SECRET_KEY: $POSTHOG_SECRET
             OBJECT_STORAGE_ACCESS_KEY_ID: 'object_storage_root_user'
             OBJECT_STORAGE_SECRET_ACCESS_KEY: 'object_storage_root_password'
             OBJECT_STORAGE_ENDPOINT: http://objectstorage:19000
-            OBJECT_STORAGE_PUBLIC_ENDPOINT: https://$DOMAIN
             SESSION_RECORDING_V2_S3_ENDPOINT: http://seaweedfs:8333
             SESSION_RECORDING_V2_S3_ACCESS_KEY_ID: 'any'
             SESSION_RECORDING_V2_S3_SECRET_ACCESS_KEY: 'any'
@@ -114,7 +114,6 @@ services:
             file: docker-compose.base.yml
             service: web
         command: /compose/start
-        logging: *default-logging
         volumes:
             - ./compose:/compose
         image: $REGISTRY_URL:$POSTHOG_APP_TAG
@@ -127,7 +126,6 @@ services:
             SESSION_RECORDING_V2_S3_ACCESS_KEY_ID: 'any'
             SESSION_RECORDING_V2_S3_SECRET_ACCESS_KEY: 'any'
             OBJECT_STORAGE_ENDPOINT: http://objectstorage:19000
-            OBJECT_STORAGE_PUBLIC_ENDPOINT: https://$DOMAIN
             SESSION_RECORDING_V2_S3_ENDPOINT: http://seaweedfs:8333
             OBJECT_STORAGE_ENABLED: true
             RECORDING_API_URL: http://recording-api:6738
@@ -137,8 +135,9 @@ services:
             OTEL_SDK_DISABLED: 'true'
             USE_GRANIAN: 'true'
             GRANIAN_WORKERS: '2'
-            OPT_OUT_CAPTURE: ${OPT_OUT_CAPTURE:-false}
-            DEPLOYMENT: 'hobby'
+            OPT_OUT_CAPTURE: ${OPT_OUT_CAPTURE:-true}
+            POSTHOG_SKIP_MIGRATION_CHECKS: ${POSTHOG_SKIP_MIGRATION_CHECKS:-}
+            PERSISTED_FEATURE_FLAGS: 'web-experiments'
         depends_on:
             - db
             - redis7
@@ -152,24 +151,29 @@ services:
             file: docker-compose.base.yml
             service: plugins
         image: ${REGISTRY_URL}:node
-        logging: *default-logging
+        volumes:
+            - ./share:/share
         environment:
             SITE_URL: https://$DOMAIN
             SECRET_KEY: $POSTHOG_SECRET
             OBJECT_STORAGE_ACCESS_KEY_ID: 'object_storage_root_user'
             OBJECT_STORAGE_SECRET_ACCESS_KEY: 'object_storage_root_password'
+            SESSION_RECORDING_V2_S3_ACCESS_KEY_ID: 'any'
+            SESSION_RECORDING_V2_S3_SECRET_ACCESS_KEY: 'any'
+            SESSION_RECORDING_V2_S3_TIMEOUT_MS: 120000
             OBJECT_STORAGE_ENDPOINT: http://objectstorage:19000
-            OBJECT_STORAGE_PUBLIC_ENDPOINT: https://$DOMAIN
+            SESSION_RECORDING_V2_S3_ENDPOINT: http://seaweedfs:8333
             OBJECT_STORAGE_ENABLED: true
             CDP_REDIS_HOST: redis7
             CDP_REDIS_PORT: 6379
+            LOGS_REDIS_HOST: redis7
+            LOGS_REDIS_PORT: 6379
+            LOGS_REDIS_TLS: 'false'
             ENCRYPTION_SALT_KEYS: $ENCRYPTION_SALT_KEYS
             CYCLOTRON_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             PERSONS_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             BEHAVIORAL_COHORTS_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             OTEL_EXPORTER_OTLP_ENDPOINT: ''
-        volumes:
-            - ./share:/share
         depends_on:
             - db
             - redis7
@@ -179,14 +183,24 @@ services:
             - seaweedfs
 
     ingestion-general:
-        extends:
-            file: docker-compose.base.yml
-            service: ingestion-general
+        command: node nodejs/dist/index.js
         image: ${REGISTRY_URL}:node
+        restart: on-failure
         logging: *default-logging
         environment:
+            PLUGIN_SERVER_MODE: 'ingestion-v2-combined'
+            DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             PERSONS_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             BEHAVIORAL_COHORTS_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
+            KAFKA_HOSTS: 'kafka:9092'
+            REDIS_URL: 'redis://redis7:6379/'
+            CLICKHOUSE_HOST: 'clickhouse'
+            CLICKHOUSE_DATABASE: 'posthog'
+            CLICKHOUSE_SECURE: 'false'
+            CLICKHOUSE_VERIFY: 'false'
+            COOKIELESS_REDIS_HOST: redis7
+            COOKIELESS_REDIS_PORT: 6379
+            CDP_REDIS_HOST: redis7
             ENCRYPTION_SALT_KEYS: $ENCRYPTION_SALT_KEYS
         depends_on:
             - db
@@ -195,12 +209,15 @@ services:
             - kafka
 
     ingestion-sessionreplay:
-        extends:
-            file: docker-compose.base.yml
-            service: ingestion-sessionreplay
+        command: node nodejs/dist/index.js
         image: ${REGISTRY_URL}:node
+        restart: on-failure
         logging: *default-logging
         environment:
+            PLUGIN_SERVER_MODE: 'recordings-blob-ingestion-v2'
+            DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
+            KAFKA_HOSTS: 'kafka:9092'
+            REDIS_URL: 'redis://redis7:6379/'
             SESSION_RECORDING_V2_S3_ACCESS_KEY_ID: 'any'
             SESSION_RECORDING_V2_S3_SECRET_ACCESS_KEY: 'any'
             SESSION_RECORDING_V2_S3_TIMEOUT_MS: 120000
@@ -212,68 +229,64 @@ services:
             - kafka
             - seaweedfs
 
-    recording-api:
-        extends:
-            file: docker-compose.base.yml
-            service: recording-api
+    ingestion-error-tracking:
+        command: node nodejs/dist/index.js
         image: ${REGISTRY_URL}:node
+        restart: on-failure
         logging: *default-logging
         environment:
+            PLUGIN_SERVER_MODE: 'ingestion-errortracking'
+            DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
+            PERSONS_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
+            KAFKA_HOSTS: 'kafka:9092'
+            REDIS_URL: 'redis://redis7:6379/'
+            CDP_REDIS_HOST: redis7
             ENCRYPTION_SALT_KEYS: $ENCRYPTION_SALT_KEYS
+        depends_on:
+            - db
+            - redis7
+            - kafka
+
+    recording-api:
+        command: node nodejs/dist/index.js
+        image: ${REGISTRY_URL}:node
+        restart: on-failure
+        logging: *default-logging
+        environment:
+            PLUGIN_SERVER_MODE: 'recording-api'
+            DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
+            REDIS_URL: 'redis://redis7:6379/'
+            CLICKHOUSE_HOST: 'clickhouse'
+            CLICKHOUSE_DATABASE: 'posthog'
+            CLICKHOUSE_SECURE: 'false'
+            CLICKHOUSE_VERIFY: 'false'
+            SESSION_RECORDING_API_REDIS_HOST: redis7
+            SESSION_RECORDING_API_REDIS_PORT: 6379
         depends_on:
             - db
             - redis7
             - clickhouse
 
-    ingestion-error-tracking:
-        extends:
-            file: docker-compose.base.yml
-            service: ingestion-error-tracking
-        image: ${REGISTRY_URL}:node
-        logging: *default-logging
-        environment:
-            ENCRYPTION_SALT_KEYS: $ENCRYPTION_SALT_KEYS
-        depends_on:
-            - db
-            - redis7
-            - kafka
-
-    ingestion-logs:
-        extends:
-            file: docker-compose.base.yml
-            service: ingestion-logs
-        image: ${REGISTRY_URL}:node
-        logging: *default-logging
-        depends_on:
-            - db
-            - redis7
-            - kafka
-
-    ingestion-traces:
-        extends:
-            file: docker-compose.base.yml
-            service: ingestion-traces
-        image: ${REGISTRY_URL}:node
-        logging: *default-logging
-        depends_on:
-            - db
-            - redis7
-            - kafka
-
     proxy:
         extends:
             file: docker-compose.base.yml
             service: proxy
-        logging: *default-logging
-        ports:
-            - '80:80'
-            - '443:443'
         volumes:
             - caddy-data:/data
             - caddy-config:/config
         environment:
-            CADDY_TLS_BLOCK: $TLS_BLOCK
-            CADDY_HOST: '$DOMAIN, http://, https://'
+            CADDY_TLS_BLOCK: "auto_https off"
+            CADDY_HOST: ':80'
+        networks:
+            - default
+            - web
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.posthog.rule=Host(`${DOMAIN}`)"
+            - "traefik.http.routers.posthog.entrypoints=websecure"
+            - "traefik.http.routers.posthog.tls.certresolver=letsencrypt"
+            - "traefik.http.services.posthog.loadbalancer.server.port=80"
+            - "traefik.docker.network=web"
         depends_on:
             - web
             - livestream
@@ -283,7 +296,6 @@ services:
             service: objectstorage
 
         restart: on-failure
-        logging: *default-logging
         volumes:
             - objectstorage:/data
         ports:
@@ -294,12 +306,7 @@ services:
         extends:
             file: docker-compose.base.yml
             service: seaweedfs
-        container_name: '${SEAWEEDFS_DOCKER_NAME:-seaweedfs-main}'
         restart: on-failure
-        logging: *default-logging
-        ports:
-            - '127.0.0.1:8333:8333' # S3 API
-            - '127.0.0.1:9333:9333' # Master server
         volumes:
             - seaweedfs:/data
         healthcheck:
@@ -320,7 +327,6 @@ services:
             file: docker-compose.base.yml
             service: asyncmigrationscheck
         image: $REGISTRY_URL:$POSTHOG_APP_TAG
-        logging: *default-logging
         environment:
             SITE_URL: https://$DOMAIN
             SECRET_KEY: $POSTHOG_SECRET
@@ -331,7 +337,6 @@ services:
         extends:
             file: docker-compose.base.yml
             service: temporal
-        logging: *default-logging
         environment:
             - ENABLE_ES=false
         ports:
@@ -342,19 +347,16 @@ services:
         extends:
             file: docker-compose.base.yml
             service: elasticsearch
-        logging: *default-logging
     temporal-admin-tools:
         extends:
             file: docker-compose.base.yml
             service: temporal-admin-tools
-        logging: *default-logging
         depends_on:
             - temporal
     temporal-ui:
         extends:
             file: docker-compose.base.yml
             service: temporal-ui
-        logging: *default-logging
         ports:
             - 8081:8080
         depends_on:
@@ -367,7 +369,6 @@ services:
         extends:
             file: docker-compose.base.yml
             service: temporal-django-worker
-        logging: *default-logging
         volumes:
             - ./compose:/compose
         image: $REGISTRY_URL:$POSTHOG_APP_TAG
@@ -389,7 +390,6 @@ services:
             service: cyclotron-janitor
         build:
             context: ./rust
-        logging: *default-logging
         environment:
             DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             KAFKA_HOSTS: 'kafka:9092'
@@ -405,7 +405,6 @@ services:
         extends:
             file: docker-compose.base.yml
             service: capture
-        logging: *default-logging
 
     replay-capture:
         build:
@@ -413,7 +412,6 @@ services:
         extends:
             file: docker-compose.base.yml
             service: replay-capture
-        logging: *default-logging
 
     property-defs-rs:
         build:
@@ -421,7 +419,6 @@ services:
         extends:
             file: docker-compose.base.yml
             service: property-defs-rs
-        logging: *default-logging
         depends_on:
             kafka-init:
                 condition: service_completed_successfully
@@ -432,7 +429,6 @@ services:
         extends:
             file: docker-compose.base.yml
             service: livestream
-        logging: *default-logging
         environment:
             - LIVESTREAM_JWT_SECRET=${POSTHOG_SECRET}
         volumes:
@@ -444,7 +440,6 @@ services:
         extends:
             file: docker-compose.base.yml
             service: feature-flags
-        logging: *default-logging
         depends_on:
             - db
             - redis7
@@ -452,7 +447,6 @@ services:
     kafka-init:
         image: docker.redpanda.com/redpandadata/redpanda:v25.1.9
         entrypoint: /bin/sh
-        logging: *default-logging
         command:
             - -c
             - |
@@ -502,7 +496,6 @@ services:
             args:
                 BIN: cymbal
         restart: on-failure
-        logging: *default-logging
         volumes:
             - ./share:/share
         environment:
