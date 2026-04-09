@@ -1,52 +1,15 @@
 #!/bin/sh
+[ -f "$(dirname "$0")/_/husky.sh" ] && . "$(dirname "$0")/_/husky.sh"
 
-REGISTRY="${DOCKER_REGISTRY:-}"
-if [ -z "$REGISTRY" ]; then
-    echo "DOCKER_REGISTRY not set, skipping main image build"
-    exit 0
-fi
+# Skip lint-staged during merges — staged files include the entire merge diff,
+# not just your changes, making it slow and pointless
+[ -f "$(git rev-parse --git-path MERGE_HEAD 2>/dev/null)" ] && exit 0
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HASH_FILE="$REPO_ROOT/.docker-hashes"
-
-compute_hash() {
-    find "$REPO_ROOT/posthog" "$REPO_ROOT/ee" "$REPO_ROOT/frontend" \
-         "$REPO_ROOT/bin" "$REPO_ROOT/common" "$REPO_ROOT/products" \
-         -type f 2>/dev/null | sort | xargs shasum -a 1 2>/dev/null | shasum -a 1 | cut -d' ' -f1
-    # Also include key config files
-    cat "$REPO_ROOT/Dockerfile" "$REPO_ROOT/pyproject.toml" \
-        "$REPO_ROOT/uv.lock" "$REPO_ROOT/pnpm-lock.yaml" \
-        "$REPO_ROOT/package.json" "$REPO_ROOT/turbo.json" 2>/dev/null | shasum -a 1 | cut -d' ' -f1
-}
-
-CURRENT_HASH=$(compute_hash | shasum -a 1 | cut -d' ' -f1)
-STORED_HASH=""
-if [ -f "$HASH_FILE" ]; then
-    STORED_HASH=$(grep "^main:" "$HASH_FILE" 2>/dev/null | cut -d: -f2)
-fi
-
-if [ "$CURRENT_HASH" = "$STORED_HASH" ]; then
-    echo "main image: no changes detected, skipping build"
-    exit 0
-fi
-
-echo "Building main image ($REGISTRY:latest) for linux/amd64..."
-docker buildx build \
-    --platform linux/amd64 \
-    --tag "$REGISTRY:latest" \
-    --push \
-    "$REPO_ROOT"
-
-if [ $? -ne 0 ]; then
-    echo "ERROR: main image build failed"
-    exit 1
-fi
-
-if [ -f "$HASH_FILE" ]; then
-    sed -i '' "s/^main:.*$/main:$CURRENT_HASH/" "$HASH_FILE"
+# Activate Flox environment if available and not already active
+# This ensures lint-staged commands work in GUI Git clients (GitHub Desktop, etc.)
+if command -v flox > /dev/null 2>&1 && [ -d ".flox/cache" ] && [ -z "$FLOX_ENV" ]; then
+    exec "$(command -v flox)" activate -- bash -c "NODE_OPTIONS='--max-old-space-size=8192' pnpm lint-staged"
 else
-    echo "main:$CURRENT_HASH" > "$HASH_FILE"
+    # Fallback: run without Flox (for non-Flox users or if already activated)
+    NODE_OPTIONS='--max-old-space-size=8192' pnpm lint-staged
 fi
-
-git add "$HASH_FILE"
-echo "main image pushed to $REGISTRY:latest"

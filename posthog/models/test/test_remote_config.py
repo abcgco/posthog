@@ -5,7 +5,6 @@ import pytest
 from posthog.test.base import BaseTest
 from unittest.mock import patch
 
-from django.core.cache import cache
 from django.test import RequestFactory, override_settings
 from django.utils import timezone
 
@@ -17,10 +16,11 @@ from posthog.models.feature_flag.feature_flag import FeatureFlag
 from posthog.models.hog_functions.hog_function import HogFunction, HogFunctionType
 from posthog.models.plugin import Plugin, PluginConfig, PluginSourceFile
 from posthog.models.project import Project
-from posthog.models.remote_config import RemoteConfig, cache_key_for_team_token
-from posthog.models.surveys.survey import Survey
+from posthog.models.remote_config import RemoteConfig
 
-CONFIG_REFRESH_QUERY_COUNT = 5
+from products.surveys.backend.models import Survey
+
+CONFIG_REFRESH_QUERY_COUNT = 6
 
 
 @pytest.mark.usefixtures("unittest_snapshot")
@@ -41,6 +41,14 @@ class _RemoteConfigBase(BaseTest):
         self.team.recording_domains = ["https://*.example.com"]
         self.team.session_recording_opt_in = True
         self.team.surveys_opt_in = True
+        self.team.test_account_filters = [  # the default test account filters may use a cohort, which aren't supported by site functions (real-time filters)
+            {
+                "key": "email",
+                "value": "@posthog.com",
+                "operator": "not_icontains",
+                "type": "person",
+            }
+        ]
         self.team.save()
 
         # There will always be a config thanks to the signal
@@ -147,6 +155,15 @@ class TestRemoteConfig(_RemoteConfigBase):
         assert self.remote_config.config["conversations"]["color"] == "#1d4aff"
         assert self.remote_config.config["conversations"]["token"] == "test_public_token_123"
         assert self.remote_config.config["conversations"]["domains"] == []
+        assert self.remote_config.config["conversations"]["widgetPosition"] == "bottom_right"
+        assert self.remote_config.config["conversations"]["requireEmail"] is False
+        assert self.remote_config.config["conversations"]["collectName"] is False
+        assert self.remote_config.config["conversations"]["identificationFormTitle"] == "Before we start..."
+        assert (
+            self.remote_config.config["conversations"]["identificationFormDescription"]
+            == "Please provide your details so we can help you better."
+        )
+        assert self.remote_config.config["conversations"]["placeholderText"] == "Type your message..."
 
     def test_conversations_enabled_with_custom_config(self):
         self.team.conversations_enabled = True
@@ -156,6 +173,12 @@ class TestRemoteConfig(_RemoteConfigBase):
             "widget_color": "#ff5733",
             "widget_public_token": "custom_token",
             "widget_domains": ["example.com", "test.com"],
+            "widget_position": "top_left",
+            "widget_require_email": True,
+            "widget_collect_name": True,
+            "widget_identification_form_title": "Let's get started",
+            "widget_identification_form_description": "Tell us about yourself",
+            "widget_placeholder_text": "Ask away...",
         }
         self.team.save()
         self.sync_remote_config()
@@ -164,6 +187,12 @@ class TestRemoteConfig(_RemoteConfigBase):
         assert self.remote_config.config["conversations"]["color"] == "#ff5733"
         assert self.remote_config.config["conversations"]["token"] == "custom_token"
         assert self.remote_config.config["conversations"]["domains"] == ["example.com", "test.com"]
+        assert self.remote_config.config["conversations"]["widgetPosition"] == "top_left"
+        assert self.remote_config.config["conversations"]["requireEmail"] is True
+        assert self.remote_config.config["conversations"]["collectName"] is True
+        assert self.remote_config.config["conversations"]["identificationFormTitle"] == "Let's get started"
+        assert self.remote_config.config["conversations"]["identificationFormDescription"] == "Tell us about yourself"
+        assert self.remote_config.config["conversations"]["placeholderText"] == "Ask away..."
 
     def test_conversations_disabled_returns_false(self):
         self.team.conversations_enabled = False
@@ -175,7 +204,7 @@ class TestRemoteConfig(_RemoteConfigBase):
         self.sync_remote_config()
         assert self.remote_config.config["conversations"] is False
 
-    @parameterized.expand([["1.00", None], ["0.95", "0.95"], ["0.50", "0.50"], ["0.00", "0.00"], [None, None]])
+    @parameterized.expand([["1.00", None], ["0.95", "0.95"], ["0.50", "0.5"], ["0.00", "0"], [None, None]])
     def test_session_recording_sample_rate(self, value: str | None, expected: str | None) -> None:
         self.team.session_recording_opt_in = True
         self.team.session_recording_sample_rate = Decimal(value) if value else None
@@ -210,6 +239,81 @@ class TestRemoteConfig(_RemoteConfigBase):
             self.team.save()
             self.sync_remote_config()
             assert self.remote_config.config["sessionRecording"]["scriptConfig"] == expected_script_config
+
+
+class TestRemoteConfigSdkVersion(_RemoteConfigBase):
+    def _reset_snippet_caches(self):
+        import posthog.models.js_snippet_versioning as sv
+
+        sv._cached_manifest = None
+
+    def setUp(self):
+        super().setUp()
+        self._reset_snippet_caches()
+
+    def tearDown(self):
+        from django.core.cache import cache
+
+        from posthog.models.js_snippet_versioning import REDIS_POINTER_MAP_KEY
+
+        cache.delete(REDIS_POINTER_MAP_KEY)
+        self._reset_snippet_caches()
+        super().tearDown()
+
+    @override_settings(POSTHOG_JS_S3_BUCKET="")
+    def test_sdk_version_absent_when_versioning_disabled(self):
+        self.sync_remote_config()
+        config = RemoteConfig.get_config_via_token(self.team.api_token)
+        assert "sdkVersion" not in config
+
+    @override_settings(POSTHOG_JS_S3_BUCKET="")
+    @patch("posthog.models.remote_config.get_disk_js_hash", return_value="mocked_hash")
+    def test_resolved_version_is_none_when_versioning_disabled(self, _mock_hash):
+        self.sync_remote_config()
+        meta = RemoteConfig.compute_array_js_metadata(self.team.api_token)
+        assert meta.resolved_version is None
+
+    @override_settings(POSTHOG_JS_S3_BUCKET="test-bucket")
+    def test_sdk_version_present_when_versioning_enabled(self):
+        import json
+
+        from django.core.cache import cache
+
+        from posthog.models.js_snippet_versioning import REDIS_POINTER_MAP_KEY
+
+        manifest = {"versions": ["1.360.0", "1.360.1"], "pointers": {"1": "1.360.1", "1.360": "1.360.1"}}
+        cache.set(REDIS_POINTER_MAP_KEY, json.dumps(manifest), timeout=None)
+        self.sync_remote_config()
+
+        config = RemoteConfig.get_config_via_token(self.team.api_token)
+        assert "sdkVersion" in config
+        assert config["sdkVersion"]["requested"] == "1"
+        assert config["sdkVersion"]["resolved"] == "1.360.1"
+
+    @override_settings(POSTHOG_JS_S3_BUCKET="test-bucket")
+    def test_sdk_version_reflects_team_pin(self):
+        import json
+
+        from django.core.cache import cache
+
+        from posthog.models.js_snippet_versioning import REDIS_POINTER_MAP_KEY
+        from posthog.models.team.extensions import get_or_create_team_extension
+        from posthog.models.team.js_snippet_config import TeamJsSnippetConfig
+
+        manifest = {
+            "versions": ["1.358.0", "1.359.0"],
+            "pointers": {"1": "1.359.0", "1.358": "1.358.0", "1.359": "1.359.0"},
+        }
+        cache.set(REDIS_POINTER_MAP_KEY, json.dumps(manifest), timeout=None)
+
+        snippet_config = get_or_create_team_extension(self.team, TeamJsSnippetConfig)
+        snippet_config.js_snippet_version = "1.358"
+        snippet_config.save()
+        self.sync_remote_config()
+
+        config = RemoteConfig.get_config_via_token(self.team.api_token)
+        assert config["sdkVersion"]["requested"] == "1.358"
+        assert config["sdkVersion"]["resolved"] == "1.358.0"
 
 
 class TestRemoteConfigSurveys(_RemoteConfigBase):
@@ -396,12 +500,13 @@ class TestRemoteConfigSurveys(_RemoteConfigBase):
         assert actual_surveys == expected_surveys
 
 
+@override_settings(POSTHOG_JS_S3_BUCKET="")
 class TestRemoteConfigCaching(_RemoteConfigBase):
     def setUp(self):
         super().setUp()
         self.remote_config.refresh_from_db()
-        # Clear the cache so we are properly testing each flow
-        assert cache.delete(cache_key_for_team_token(self.team.api_token))
+        # Clear the HyperCache so we are properly testing each flow
+        RemoteConfig.get_hypercache().clear_cache(self.team.api_token)
 
     def _assert_matches_config(self, data):
         assert data == self.snapshot
@@ -426,7 +531,7 @@ class TestRemoteConfigCaching(_RemoteConfigBase):
     def test_persists_data_to_redis_on_sync(self):
         self.remote_config.config["surveys"] = True
         self.remote_config.sync()
-        assert cache.get(cache_key_for_team_token(self.team.api_token))
+        assert RemoteConfig.get_hypercache().get_from_cache(self.team.api_token) is not None
 
     def test_gets_via_redis_cache(self):
         with self.assertNumQueries(CONFIG_REFRESH_QUERY_COUNT):
@@ -454,24 +559,27 @@ class TestRemoteConfigCaching(_RemoteConfigBase):
             data = RemoteConfig.get_config_js_via_token(self.team.api_token)
             self._assert_matches_config_js(data)
 
-    @patch("posthog.models.remote_config.get_array_js_content", return_value="[MOCKED_ARRAY_JS_CONTENT]")
-    def test_gets_array_js_via_redis_cache(self, mock_get_array_js_content):
+    @patch("posthog.models.remote_config.get_disk_js_hash", return_value="mocked_hash")
+    @patch("posthog.models.remote_config.get_js_content", return_value="[MOCKED_ARRAY_JS_CONTENT]")
+    def test_gets_array_js_via_redis_cache(self, mock_get_array_js_content, _mock_hash):
         with self.assertNumQueries(CONFIG_REFRESH_QUERY_COUNT):
-            data = RemoteConfig.get_array_js_via_token(self.team.api_token)
-            self._assert_matches_config_array_js(data)
+            meta = RemoteConfig.compute_array_js_metadata(self.team.api_token)
+            content = RemoteConfig.build_array_js_content(self.team.api_token, meta.config, meta.resolved_version)
+            self._assert_matches_config_array_js(content)
 
         with self.assertNumQueries(0):
-            data = RemoteConfig.get_array_js_via_token(self.team.api_token)
-            self._assert_matches_config_array_js(data)
+            meta = RemoteConfig.compute_array_js_metadata(self.team.api_token)
+            content = RemoteConfig.build_array_js_content(self.team.api_token, meta.config, meta.resolved_version)
+            self._assert_matches_config_array_js(content)
 
     def test_caches_missing_response(self):
-        with self.assertNumQueries(2):  # RemoteConfig lookup + Team lookup for on-demand creation
+        with self.assertNumQueries(1):  # Just RemoteConfig lookup (no on-demand Team creation)
             with pytest.raises(RemoteConfig.DoesNotExist):
-                RemoteConfig.get_array_js_via_token("missing-token")
+                RemoteConfig.compute_array_js_metadata("missing-token")
 
         with self.assertNumQueries(0):
             with pytest.raises(RemoteConfig.DoesNotExist):
-                RemoteConfig.get_array_js_via_token("missing-token")
+                RemoteConfig.compute_array_js_metadata("missing-token")
 
     def test_sanitizes_config_for_public_cdn(self):
         config = self.remote_config.get_config_via_token(self.team.api_token)
@@ -500,6 +608,10 @@ class TestRemoteConfigCaching(_RemoteConfigBase):
                 "urlBlocklist": [],
                 "eventTriggers": [],
                 "triggerMatchType": None,
+                "canvasFps": None,
+                "canvasQuality": None,
+                "recordCanvas": False,
+                "version": 1,
                 "scriptConfig": {"script": "posthog-recorder"},
             },
             "errorTracking": {
@@ -558,6 +670,13 @@ class TestRemoteConfigCaching(_RemoteConfigBase):
 
 
 class TestRemoteConfigJS(_RemoteConfigBase):
+    def _run_remote_config_on_commit_synchronously(self):
+        from posthog.tasks.remote_config import update_team_remote_config
+
+        return patch("posthog.models.remote_config.transaction.on_commit", side_effect=lambda fn: fn()), patch(
+            "posthog.models.remote_config._update_team_remote_config", side_effect=update_team_remote_config
+        )
+
     def test_renders_js_including_config(self):
         # NOTE: This is a very basic test to check that the JS is rendered correctly
         # It doesn't check the actual contents of the JS, as that changes often but checks some general things
@@ -679,6 +798,53 @@ class TestRemoteConfigJS(_RemoteConfigBase):
 
         js = self.remote_config.get_config_js_via_token(self.team.api_token)
         assert str(site_destination.id) not in js
+
+    @patch("posthog.cdp.site_functions.transpile", side_effect=mock_transpile)
+    def test_disabling_site_functions_updates_remote_config(self, mock_transpile_fn):
+        site_app = HogFunction.objects.create(
+            name="Site app",
+            type=HogFunctionType.SITE_APP,
+            team=self.team,
+            enabled=True,
+        )
+
+        self.sync_remote_config()
+
+        js = self.remote_config.get_config_js_via_token(self.team.api_token)
+        assert str(site_app.id) in js
+
+        on_commit_patch, update_remote_config_patch = self._run_remote_config_on_commit_synchronously()
+        with on_commit_patch, update_remote_config_patch:
+            site_app.enabled = False
+            site_app.save()
+
+        self.remote_config.refresh_from_db()
+
+        js = self.remote_config.get_config_js_via_token(self.team.api_token)
+        assert str(site_app.id) not in js
+
+    @patch("posthog.cdp.site_functions.transpile", side_effect=mock_transpile)
+    def test_deleting_site_functions_updates_remote_config(self, mock_transpile_fn):
+        site_app = HogFunction.objects.create(
+            name="Site app",
+            type=HogFunctionType.SITE_APP,
+            team=self.team,
+            enabled=True,
+        )
+
+        self.sync_remote_config()
+
+        js = self.remote_config.get_config_js_via_token(self.team.api_token)
+        assert str(site_app.id) in js
+
+        on_commit_patch, update_remote_config_patch = self._run_remote_config_on_commit_synchronously()
+        with on_commit_patch, update_remote_config_patch:
+            site_app.delete()
+
+        self.remote_config.refresh_from_db()
+
+        js = self.remote_config.get_config_js_via_token(self.team.api_token)
+        assert str(site_app.id) not in js
 
 
 class TestRemoteConfigRaceCondition(_RemoteConfigBase):

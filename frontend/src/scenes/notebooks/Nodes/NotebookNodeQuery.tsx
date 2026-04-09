@@ -9,7 +9,6 @@ import { insightDataLogic } from 'scenes/insights/insightDataLogic'
 import { insightLogic } from 'scenes/insights/insightLogic'
 import { useSummarizeInsight } from 'scenes/insights/summarizeInsight'
 import { createPostHogWidgetNode } from 'scenes/notebooks/Nodes/NodeWrapper'
-import { notebookLogic } from 'scenes/notebooks/Notebook/notebookLogic'
 import { urls } from 'scenes/urls'
 
 import { Query } from '~/queries/Query/Query'
@@ -30,7 +29,7 @@ import { NotebookNodeAttributeProperties, NotebookNodeProps, NotebookNodeType } 
 import { notebookNodeLogic } from './notebookNodeLogic'
 import { SHORT_CODE_REGEX_MATCH_GROUPS } from './utils'
 
-const DEFAULT_QUERY: QuerySchema = {
+export const DEFAULT_QUERY: QuerySchema = {
     kind: NodeKind.DataTableNode,
     source: {
         kind: NodeKind.EventsQuery,
@@ -47,9 +46,10 @@ const Component = ({
 }: NotebookNodeProps<NotebookNodeQueryAttributes>): JSX.Element | null => {
     const { query, nodeId } = attributes
     const nodeLogic = useMountedLogic(notebookNodeLogic)
-    const { expanded } = useValues(nodeLogic)
+    const { expanded, notebookLogic } = useValues(nodeLogic)
     const { setTitlePlaceholder } = useActions(nodeLogic)
     const summarizeInsight = useSummarizeInsight()
+    const { canvasFiltersOverride } = useValues(notebookLogic)
 
     const insightLogicProps = {
         dashboardItemId: query.kind === NodeKind.SavedInsightNode ? query.shortId : ('new' as const),
@@ -107,33 +107,48 @@ const Component = ({
             modifiedQuery.embedded = true
         }
 
+        if (isDataTableNode(modifiedQuery) && isEventsQuery(modifiedQuery.source)) {
+            modifiedQuery.source.fixedProperties = canvasFiltersOverride
+            updateAttributes({ ...attributes, isDefaultFilterApplied: true })
+        }
+
         return modifiedQuery
-    }, [query])
+    }, [query]) // oxlint-disable-line react-hooks/exhaustive-deps
 
     if (!expanded) {
         return null
     }
 
+    const isInsightViz = isInsightVizNode(modifiedQuery) || isSavedInsightNode(modifiedQuery)
+
+    const queryComponent = (
+        <Query
+            uniqueKey={nodeId + '-component'}
+            query={modifiedQuery}
+            attachTo={notebookLogic}
+            setQuery={(t) => {
+                updateAttributes({
+                    query: {
+                        ...attributes.query,
+                        source: (t as DataTableNode | InsightVizNode).source,
+                    } as QuerySchema,
+                })
+            }}
+            embedded
+            readOnly
+        />
+    )
+
     return (
         <div className="flex flex-1 flex-col h-full" data-attr="notebook-node-query">
             <BindLogic logic={insightLogic} props={insightLogicProps}>
-                <ScrollableShadows direction="vertical" className="flex-1">
-                    <Query
-                        // use separate keys for the settings and visualization to avoid conflicts with insightProps
-                        uniqueKey={nodeId + '-component'}
-                        query={modifiedQuery}
-                        setQuery={(t) => {
-                            updateAttributes({
-                                query: {
-                                    ...attributes.query,
-                                    source: (t as DataTableNode | InsightVizNode).source,
-                                } as QuerySchema,
-                            })
-                        }}
-                        embedded
-                        readOnly
-                    />
-                </ScrollableShadows>
+                {isInsightViz ? (
+                    <div className="flex flex-1 flex-col overflow-hidden">{queryComponent}</div>
+                ) : (
+                    <ScrollableShadows direction="vertical" className="flex-1">
+                        {queryComponent}
+                    </ScrollableShadows>
+                )}
             </BindLogic>
         </div>
     )
@@ -151,6 +166,8 @@ export const Settings = ({
     updateAttributes,
 }: NotebookNodeAttributeProperties<NotebookNodeQueryAttributes>): JSX.Element => {
     const { query, isDefaultFilterApplied } = attributes
+    const nodeLogic = useMountedLogic(notebookNodeLogic)
+    const { notebookLogic } = useValues(nodeLogic)
     const { canvasFiltersOverride } = useValues(notebookLogic)
 
     const modifiedQuery = useMemo(() => {
@@ -246,6 +263,7 @@ export const Settings = ({
             <Query
                 // use separate keys for the settings and visualization to avoid conflicts with insightProps
                 uniqueKey={attributes.nodeId + '-settings'}
+                attachTo={notebookLogic}
                 query={modifiedQuery}
                 setQuery={(t) => {
                     updateAttributes({

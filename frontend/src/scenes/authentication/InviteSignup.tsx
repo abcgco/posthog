@@ -9,8 +9,8 @@ import { LemonButton, LemonDivider, LemonInput } from '@posthog/lemon-ui'
 import { BridgePage } from 'lib/components/BridgePage/BridgePage'
 import PasswordStrength from 'lib/components/PasswordStrength'
 import SignupRoleSelect from 'lib/components/SignupRoleSelect'
-import { SSOEnforcedLoginButton, SocialLoginButtons } from 'lib/components/SocialLoginButton/SocialLoginButton'
 import passkeyLogo from 'lib/components/SocialLoginButton/passkey.svg'
+import { SSOEnforcedLoginButton, SocialLoginButtons } from 'lib/components/SocialLoginButton/SocialLoginButton'
 import { supportLogic } from 'lib/components/Support/supportLogic'
 import { LemonBanner } from 'lib/lemon-ui/LemonBanner'
 import { LemonField } from 'lib/lemon-ui/LemonField'
@@ -24,9 +24,10 @@ import { userLogic } from 'scenes/userLogic'
 
 import { PrevalidatedInvite } from '~/types'
 
-import { SupportModalButton } from './SupportModalButton'
 import { ErrorCodes, inviteSignupLogic } from './inviteSignupLogic'
 import { loginLogic } from './loginLogic'
+import { TurnstileChallenge } from './signup/signupForm/TurnstileChallenge'
+import { SupportModalButton } from './SupportModalButton'
 
 export const scene: SceneExport = {
     component: InviteSignup,
@@ -205,8 +206,11 @@ function UnauthenticatedAcceptInvite({ invite }: { invite: PrevalidatedInvite })
         isPasskeyRegistering,
         passkeyError,
         passkeySignupEnabled,
+        challengeRequired,
+        turnstileSiteKey,
+        turnstileToken,
     } = useValues(inviteSignupLogic)
-    const { registerPasskey } = useActions(inviteSignupLogic)
+    const { registerPasskey, setTurnstileToken } = useActions(inviteSignupLogic)
     const { preflight } = useValues(preflightLogic)
     const { openSupportForm } = useActions(supportLogic)
 
@@ -277,10 +281,11 @@ function UnauthenticatedAcceptInvite({ invite }: { invite: PrevalidatedInvite })
                         {passkeySignupEnabled && (
                             <>
                                 {passkeyRegistered ? (
-                                    <div className="border border-success-lighter rounded-lg p-4 bg-success-highlight text-center">
+                                    <div className="bg-surface-secondary rounded-lg p-4 text-center">
                                         <img src={passkeyLogo} alt="Passkey" className="w-8 h-8 mx-auto mb-2" />
-                                        <p className="font-semibold text-success mb-1">
-                                            Passkey registered successfully!
+                                        <p className="font-semibold mb-1">Passkey registered successfully!</p>
+                                        <p className="text-sm text-muted">
+                                            Complete the form below and press "Continue" to create your account.
                                         </p>
                                     </div>
                                 ) : (
@@ -300,32 +305,37 @@ function UnauthenticatedAcceptInvite({ invite }: { invite: PrevalidatedInvite })
                                         Sign up with passkey
                                     </LemonButton>
                                 )}
-                                <div className="flex items-center gap-3 my-4">
-                                    <div className="flex-1 border-t border-border" />
-                                    <span className="text-secondary text-sm">or use a password</span>
-                                    <div className="flex-1 border-t border-border" />
-                                </div>
+
+                                {!passkeyRegistered && (
+                                    <div className="flex items-center gap-3 my-4">
+                                        <div className="flex-1 border-t border-border" />
+                                        <span className="text-secondary text-sm">or use a password</span>
+                                        <div className="flex-1 border-t border-border" />
+                                    </div>
+                                )}
                             </>
                         )}
-                        <LemonField
-                            name="password"
-                            label={
-                                <div className="flex flex-1 items-center justify-between">
-                                    <span>Password</span>
-                                    <PasswordStrength validatedPassword={validatedPassword} />
-                                </div>
-                            }
-                        >
-                            <LemonInput
-                                type="password"
-                                className="ph-ignore-input"
-                                data-attr="password"
-                                placeholder="••••••••••"
-                                autoComplete="new-password"
-                                autoFocus={window.screen.width >= 768} // do not autofocus on small-width screens
-                                disabled={isSignupSubmitting || passkeyRegistered}
-                            />
-                        </LemonField>
+                        {!passkeyRegistered && (
+                            <LemonField
+                                name="password"
+                                label={
+                                    <div className="flex flex-1 items-center justify-between">
+                                        <span>Password</span>
+                                        <PasswordStrength validatedPassword={validatedPassword} />
+                                    </div>
+                                }
+                            >
+                                <LemonInput
+                                    type="password"
+                                    className="ph-ignore-input"
+                                    data-attr="password"
+                                    placeholder="••••••••••"
+                                    autoComplete="new-password"
+                                    autoFocus={window.screen.width >= 768} // do not autofocus on small-width screens
+                                    disabled={isSignupSubmitting || passkeyRegistered}
+                                />
+                            </LemonField>
+                        )}
 
                         <LemonField
                             name="first_name"
@@ -344,20 +354,28 @@ function UnauthenticatedAcceptInvite({ invite }: { invite: PrevalidatedInvite })
                 )}
 
                 {/* Show regular login button if SSO is not enforced */}
-                {!precheckResponse.sso_enforcement && (
-                    <LemonButton
-                        type="primary"
-                        status="alt"
-                        htmlType="submit"
-                        data-attr="password-signup"
-                        fullWidth
-                        center
-                        loading={isSignupSubmitting || precheckResponseLoading}
-                        size="large"
-                    >
-                        Continue
-                    </LemonButton>
-                )}
+                {!precheckResponse.sso_enforcement &&
+                    (challengeRequired && turnstileSiteKey ? (
+                        <TurnstileChallenge
+                            siteKey={turnstileSiteKey}
+                            onSuccess={setTurnstileToken}
+                            tokenReceived={!!turnstileToken}
+                            email={invite.target_email}
+                        />
+                    ) : (
+                        <LemonButton
+                            type="primary"
+                            status="alt"
+                            htmlType="submit"
+                            data-attr="password-signup"
+                            fullWidth
+                            center
+                            loading={isSignupSubmitting || precheckResponseLoading}
+                            size="large"
+                        >
+                            Continue
+                        </LemonButton>
+                    ))}
 
                 {/* Show enforced SSO button if required */}
                 {precheckResponse.sso_enforcement && (

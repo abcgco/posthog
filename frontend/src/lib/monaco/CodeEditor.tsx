@@ -1,11 +1,12 @@
 import './CodeEditor.scss'
 
 import MonacoEditor, { type EditorProps, Monaco, DiffEditor as MonacoDiffEditor, loader } from '@monaco-editor/react'
-import { BuiltLogic, useMountedLogic, useValues } from 'kea'
+import { BuiltLogic, useActions, useMountedLogic, useValues } from 'kea'
 import * as monacoModule from 'monaco-editor'
 import { IDisposable, editor, editor as importedEditor } from 'monaco-editor'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import 'lib/monaco/monacoEnvironment'
 import { useOnMountEffect } from 'lib/hooks/useOnMountEffect'
 import { usePageVisibility } from 'lib/hooks/usePageVisibility'
 import { Spinner } from 'lib/lemon-ui/Spinner'
@@ -38,9 +39,12 @@ export interface CodeEditorProps extends Omit<EditorProps, 'loading' | 'theme'> 
     schema?: Record<string, any> | null
     onMetadata?: (metadata: HogQLMetadataResponse | null) => void
     onMetadataLoading?: (loading: boolean) => void
+    onFixWithAI?: (prompt: string) => void
     onError?: (error: string | null) => void
     /** The original value to compare against - renders it in diff mode */
     originalValue?: string
+    /** Enable vim keybindings */
+    enableVimMode?: boolean
 }
 let codeEditorIndex = 0
 
@@ -131,7 +135,9 @@ export function CodeEditor({
     onError,
     onMetadata,
     onMetadataLoading,
+    onFixWithAI,
     originalValue,
+    enableVimMode,
     ...editorProps
 }: CodeEditorProps): JSX.Element {
     const { isDarkModeOn } = useValues(themeLogic)
@@ -140,6 +146,12 @@ export function CodeEditor({
         null as [Monaco, importedEditor.IStandaloneCodeEditor] | null
     )
     const [monaco, editor] = monacoAndEditor ?? []
+
+    // Keep a ref to the editor for cleanup - ensures we can dispose it even if state is stale
+    const editorRef = useRef<importedEditor.IStandaloneCodeEditor | null>(null)
+
+    const vimModeRef = useRef<{ dispose: () => void } | null>(null)
+    const vimStatusBarRef = useRef<HTMLDivElement | null>(null)
 
     const [realKey] = useState(() => codeEditorIndex++)
     const builtCodeEditorLogic = codeEditorLogic({
@@ -153,9 +165,13 @@ export function CodeEditor({
         onError,
         onMetadata,
         onMetadataLoading,
+        onFixWithAI,
         metadataFilters: sourceQuery?.kind === NodeKind.HogQLQuery ? sourceQuery.filters : undefined,
     })
     useMountedLogic(builtCodeEditorLogic)
+
+    const { vimCommandHistory } = useValues(builtCodeEditorLogic)
+    const { appendVimCommand } = useActions(builtCodeEditorLogic)
 
     const { isVisible } = usePageVisibility()
 
@@ -170,8 +186,36 @@ export function CodeEditor({
         return monacoRoot
     }, [])
 
+    // Using useRef, not useState, as we don't want to reload the component when this changes.
+    const monacoDisposables = useRef([] as IDisposable[])
+    const mutationObserver = useRef<MutationObserver | null>(null)
+
+    // Consolidated cleanup: dispose editor and its resources BEFORE removing monacoRoot from DOM.
+    // This prevents Monaco's internal services (hoverService, contextViewService) from holding
+    // references to detached DOM nodes.
     useOnMountEffect(() => {
-        return () => monacoRoot?.remove()
+        return () => {
+            // 1. Dispose all custom disposables (actions, observers, etc.)
+            monacoDisposables.current.forEach((d) => d?.dispose())
+            monacoDisposables.current = []
+
+            // 2. Disconnect and clear mutation observer to fully release DOM references
+            mutationObserver.current?.disconnect()
+            mutationObserver.current = null
+
+            // 3. Clear codeEditorLogic reference from model to break kea reference chain
+            const model = editorRef.current?.getModel()
+            if (model) {
+                ;(model as any).codeEditorLogic = undefined
+            }
+
+            // 4. Clear state to release React's reference to the editor
+            setMonacoAndEditor(null)
+
+            // 5. Now safe to remove monacoRoot - editor disposal happens via @monaco-editor/react
+            // but our cleanup ran first, breaking the reference chains
+            monacoRoot?.remove()
+        }
     })
 
     useEffect(() => {
@@ -204,14 +248,37 @@ export function CodeEditor({
         })
     }, [monaco, schema])
 
-    // Using useRef, not useState, as we don't want to reload the component when this changes.
-    const monacoDisposables = useRef([] as IDisposable[])
-    const mutationObserver = useRef<MutationObserver | null>(null)
-    useOnMountEffect(() => {
-        return () => {
-            monacoDisposables.current.forEach((d) => d?.dispose())
+    useEffect(() => {
+        if (!editor) {
+            return
         }
-    })
+
+        let cancelled = false
+
+        if (enableVimMode && vimStatusBarRef.current) {
+            const statusBar = vimStatusBarRef.current
+            void import('lib/monaco/vimMode').then(({ setupVimMode }) => {
+                if (cancelled) {
+                    return
+                }
+                vimModeRef.current = setupVimMode(editor, statusBar, {
+                    initialHistory: vimCommandHistory,
+                    onCommandExecuted: appendVimCommand,
+                })
+            })
+        } else if (vimModeRef.current) {
+            vimModeRef.current.dispose()
+            vimModeRef.current = null
+        }
+
+        return () => {
+            cancelled = true
+            if (vimModeRef.current) {
+                vimModeRef.current.dispose()
+                vimModeRef.current = null
+            }
+        }
+    }, [editor, enableVimMode, vimCommandHistory, appendVimCommand])
 
     const editorOptions: editor.IStandaloneEditorConstructionOptions = {
         minimap: {
@@ -230,7 +297,7 @@ export function CodeEditor({
         overviewRulerLanes: 3,
         overflowWidgetsDomNode: monacoRoot,
         ...options,
-        padding: { bottom: 8, top: 8 },
+        padding: { bottom: enableVimMode ? 28 : 8, top: 8 },
         scrollbar: {
             vertical: scrollbarRendering,
             horizontal: scrollbarRendering,
@@ -240,6 +307,7 @@ export function CodeEditor({
     }
 
     const editorOnMount = (editor: importedEditor.IStandaloneCodeEditor, monaco: Monaco): void => {
+        editorRef.current = editor
         setMonacoAndEditor([monaco, editor])
         initEditor(monaco, editor, editorProps, options ?? {}, builtCodeEditorLogic)
 
@@ -277,6 +345,14 @@ export function CodeEditor({
         monacoDisposables.current.push({
             dispose: () => observer.disconnect(),
         })
+
+        monacoDisposables.current.push(
+            monaco.editor.registerCommand('posthog.hogql.fixWithAI', (_, prompt) => {
+                if (typeof prompt === 'string' && prompt.length > 0) {
+                    onFixWithAI?.(prompt)
+                }
+            })
+        )
 
         if (onPressCmdEnter) {
             monacoDisposables.current.push(
@@ -328,6 +404,7 @@ export function CodeEditor({
         // If originalValue is provided, we render a diff editor instead
         const diffEditorOnMount = (diff: importedEditor.IStandaloneDiffEditor, monaco: Monaco): void => {
             const modifiedEditor = diff.getModifiedEditor()
+            editorRef.current = modifiedEditor
             setMonacoAndEditor([monaco, modifiedEditor])
 
             if (editorProps.onChange) {
@@ -359,14 +436,22 @@ export function CodeEditor({
     }
 
     return (
-        <MonacoEditor // eslint-disable-line react/forbid-elements
-            key={queryKey}
-            theme={isDarkModeOn ? 'vs-dark' : 'vs-light'}
-            loading={<Spinner />}
-            value={value}
-            options={editorOptions}
-            onMount={editorOnMount}
-            {...editorProps}
-        />
+        <div className="CodeEditor relative h-full w-full">
+            <MonacoEditor // eslint-disable-line react/forbid-elements
+                key={queryKey}
+                theme={isDarkModeOn ? 'vs-dark' : 'vs-light'}
+                loading={<Spinner />}
+                value={value}
+                options={editorOptions}
+                onMount={editorOnMount}
+                {...editorProps}
+            />
+            {enableVimMode && (
+                <div
+                    ref={vimStatusBarRef}
+                    className="CodeEditor__vim-status-bar absolute bottom-0 left-0 right-0 font-mono text-xs px-2 py-0.5 bg-bg-light border-t z-10"
+                />
+            )}
+        </div>
     )
 }

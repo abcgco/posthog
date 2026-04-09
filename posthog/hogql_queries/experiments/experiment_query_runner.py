@@ -6,6 +6,7 @@ from rest_framework.exceptions import ValidationError
 
 from posthog.schema import (
     CachedExperimentQueryResponse,
+    ExperimentActorsQuery,
     ExperimentBreakdownResult,
     ExperimentDataWarehouseNode,
     ExperimentFunnelMetric,
@@ -22,11 +23,10 @@ from posthog.schema import (
 from posthog.hogql import ast
 from posthog.hogql.constants import HogQLGlobalSettings
 from posthog.hogql.modifiers import create_default_modifiers_for_team
-from posthog.hogql.printer import to_printed_hogql
 from posthog.hogql.query import execute_hogql_query
 
 from posthog.clickhouse.query_tagging import Product, tag_queries
-from posthog.hogql_queries.experiments import MULTIPLE_VARIANT_KEY
+from posthog.hogql_queries.experiments import CONTROL_VARIANT_KEY, MULTIPLE_VARIANT_KEY
 from posthog.hogql_queries.experiments.base_query_utils import get_experiment_date_range
 from posthog.hogql_queries.experiments.error_handling import experiment_error_handler
 from posthog.hogql_queries.experiments.experiment_query_builder import (
@@ -40,7 +40,7 @@ from posthog.hogql_queries.experiments.exposure_query_logic import (
 from posthog.hogql_queries.experiments.utils import (
     aggregate_variants_across_breakdowns,
     get_bayesian_experiment_result,
-    get_experiment_query_sql,
+    get_experiment_query_debug,
     get_experiment_stats_method,
     get_frequentist_experiment_result,
     get_variant_results,
@@ -48,10 +48,24 @@ from posthog.hogql_queries.experiments.utils import (
 )
 from posthog.hogql_queries.query_runner import QueryRunner
 from posthog.hogql_queries.utils.query_date_range import QueryDateRange
-from posthog.models.experiment import Experiment
+
+from products.analytics_platform.backend.lazy_computation.lazy_computation_executor import (
+    LazyComputationResult,
+    LazyComputationTable,
+    ensure_precomputed,
+)
+from products.experiments.backend.metric_utils import get_default_metric_title
+from products.experiments.backend.models.experiment import Experiment
 
 logger = structlog.get_logger(__name__)
 
+# Variable TTL for experiment exposure lazy computation
+# Current day refreshes frequently (data arriving), old data cached long
+DEFAULT_EXPOSURE_TTL_SECONDS = {
+    "0d": 15 * 60,  # 15 min
+    "1d": 60 * 60,  # 1 hour
+    "default": 60 * 24 * 60 * 60,  # 60 days - data frozen
+}
 
 MAX_EXECUTION_TIME = 600
 MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY = 37 * 1024 * 1024 * 1024  # 37 GB
@@ -60,6 +74,7 @@ MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY = 37 * 1024 * 1024 * 1024  # 37 GB
 class ExperimentQueryRunner(QueryRunner):
     query: ExperimentQuery
     cached_response: CachedExperimentQueryResponse
+    actors_query: Optional[ExperimentActorsQuery] = None
 
     def __init__(
         self,
@@ -67,18 +82,20 @@ class ExperimentQueryRunner(QueryRunner):
         override_end_date: Optional[datetime] = None,
         user_facing: bool = True,
         max_execution_time: Optional[int] = None,
+        force_precomputation: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.override_end_date = override_end_date
         self.user_facing = user_facing
         self.max_execution_time = max_execution_time if max_execution_time is not None else MAX_EXECUTION_TIME
+        self.force_precomputation = force_precomputation
 
         if not self.query.experiment_id:
             raise ValidationError("experiment_id is required")
 
         try:
-            self.experiment = Experiment.objects.get(id=self.query.experiment_id)
+            self.experiment = Experiment.objects.get(id=self.query.experiment_id, team=self.team)
         except Experiment.DoesNotExist:
             raise ValidationError(f"Experiment with id {self.query.experiment_id} not found")
         self.feature_flag = self.experiment.feature_flag
@@ -88,6 +105,9 @@ class ExperimentQueryRunner(QueryRunner):
         self.variants = [variant["key"] for variant in self.feature_flag.variants]
         if self.experiment.holdout:
             self.variants.append(f"holdout-{self.experiment.holdout.id}")
+
+        stats_config = self.experiment.stats_config or {}
+        self.baseline_variant_key = stats_config.get("baseline_variant_key", CONTROL_VARIANT_KEY)
 
         self.date_range = get_experiment_date_range(self.experiment, self.team, self.override_end_date)
         self.date_range_query = QueryDateRange(
@@ -124,6 +144,7 @@ class ExperimentQueryRunner(QueryRunner):
 
         self.clickhouse_sql: str | None = None
         self.hogql: str | None = None
+        self._is_precomputed: bool = False
 
     def _get_breakdowns_for_builder(self) -> list | None:
         """Extract and validate breakdowns from metric configuration."""
@@ -139,6 +160,34 @@ class ExperimentQueryRunner(QueryRunner):
             raise ValidationError("Maximum of 3 breakdowns are supported for experiment metrics")
 
         return breakdowns
+
+    def _ensure_exposures_precomputed(self, builder: ExperimentQueryBuilder) -> LazyComputationResult:
+        """
+        Ensures lazy-computed exposure data exists for this experiment.
+
+        Gets the exposure query from the builder and passes it to the lazy computation
+        system, which will compute and store the exposure data if not already cached.
+
+        Returns:
+            LazyComputationResult with job_ids that can be used to query the data
+        """
+        query_string, placeholders = builder.get_exposure_query_for_precomputation()
+
+        if not self.experiment.start_date:
+            raise ValidationError("Experiment must have a start date for lazy computation")
+
+        date_from = self.experiment.start_date
+        date_to = self.override_end_date or self.experiment.end_date or datetime.now(UTC)
+
+        return ensure_precomputed(
+            team=self.team,
+            insert_query=query_string,
+            time_range_start=date_from,
+            time_range_end=date_to,
+            ttl_seconds=DEFAULT_EXPOSURE_TTL_SECONDS,
+            table=LazyComputationTable.EXPERIMENT_EXPOSURES_PREAGGREGATED,
+            placeholders=placeholders,
+        )
 
     def _get_experiment_query(self) -> ast.SelectQuery:
         """
@@ -167,7 +216,23 @@ class ExperimentQueryRunner(QueryRunner):
             entity_key=self.entity_key,
             metric=self.metric,
             breakdowns=self._get_breakdowns_for_builder(),
+            force_precomputation=self.force_precomputation,
+            only_count_matured_users=self.experiment.only_count_matured_users,
         )
+
+        # Skip precomputation for data warehouse metrics because the precomputed table
+        # doesn't include the join keys needed to link exposures to data warehouse tables
+        if self.experiment.exposure_preaggregation_enabled and not self.is_data_warehouse_query:
+            try:
+                result = self._ensure_exposures_precomputed(builder)
+                if result.ready:
+                    builder.preaggregation_job_ids = [str(job_id) for job_id in result.job_ids]
+                    self._is_precomputed = True
+                else:
+                    logger.warning("exposure_lazy_computation_not_ready", experiment_id=self.experiment.id)
+            except Exception:
+                logger.exception("exposure_lazy_computation_failed", experiment_id=self.experiment.id)
+
         return builder.build_query()
 
     def _evaluate_experiment_query(
@@ -175,17 +240,26 @@ class ExperimentQueryRunner(QueryRunner):
     ) -> list[tuple]:
         # Adding experiment specific tags to the tag collection
         # This will be available as labels in Prometheus
+        metric_name = self.metric.name or get_default_metric_title(self.metric.model_dump())
         tag_queries(
             product=Product.EXPERIMENTS,
             experiment_id=self.experiment.id,
             experiment_name=self.experiment.name,
             experiment_feature_flag_key=self.feature_flag.key,
             experiment_is_data_warehouse_query=self.is_data_warehouse_query,
+            experiment_metric_uuid=self.metric.uuid,
+            experiment_metric_name=metric_name,
         )
 
         experiment_query_ast = self._get_experiment_query()
-        self.hogql = to_printed_hogql(experiment_query_ast, self.team)
-        self.clickhouse_sql = get_experiment_query_sql(experiment_query_ast, self.team)
+
+        # Tag after _get_experiment_query() which sets _is_precomputed
+        tag_queries(
+            experiment_execution_path="precomputed" if self._is_precomputed else "direct_scan",
+        )
+        experiment_query_debug = get_experiment_query_debug(experiment_query_ast, self.team)
+        self.hogql = experiment_query_debug[0]
+        self.clickhouse_sql = experiment_query_debug[1]
 
         response = execute_hogql_query(
             query_type="ExperimentQuery",
@@ -195,7 +269,7 @@ class ExperimentQueryRunner(QueryRunner):
             modifiers=create_default_modifiers_for_team(self.team),
             settings=HogQLGlobalSettings(
                 max_execution_time=self.max_execution_time,
-                allow_experimental_analyzer=True,
+                enable_analyzer=True,
                 max_bytes_before_external_group_by=MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY,
             ),
             workload=self.workload,
@@ -230,6 +304,7 @@ class ExperimentQueryRunner(QueryRunner):
 
         result.clickhouse_sql = self.clickhouse_sql
         result.hogql = self.hogql
+        result.is_precomputed = self._is_precomputed
 
         return result
 
@@ -245,7 +320,7 @@ class ExperimentQueryRunner(QueryRunner):
 
     def _calculate_statistics_for_variants(self, variants: list[ExperimentStatsBase]) -> ExperimentQueryResponse:
         """Calculate statistical analysis results for a set of variants."""
-        control_variant, test_variants = split_baseline_and_test_variants(variants)
+        control_variant, test_variants = split_baseline_and_test_variants(variants, self.baseline_variant_key)
 
         if self.stats_method == "frequentist":
             return get_frequentist_experiment_result(
@@ -283,6 +358,22 @@ class ExperimentQueryRunner(QueryRunner):
     ) -> ExperimentBreakdownResult:
         """Compute statistics for a single breakdown combination."""
         breakdown_variants = [v for bv, v in variant_results if bv == breakdown_tuple]
+
+        # Ensure all expected variants are present in this breakdown group
+        # Some breakdown groups may not have data for all variants (e.g., no control users with specific browser)
+        variants_present = {v.key for v in breakdown_variants}
+        for expected_variant in self.variants:
+            if expected_variant not in variants_present:
+                # Add missing variant with zero stats to avoid "No control variant found" error
+                breakdown_variants.append(
+                    ExperimentStatsBase(
+                        key=expected_variant,
+                        number_of_samples=0,
+                        sum=0,
+                        sum_squares=0,
+                    )
+                )
+
         stats = self._calculate_statistics_for_variants(breakdown_variants)
 
         return ExperimentBreakdownResult(
@@ -331,6 +422,84 @@ class ExperimentQueryRunner(QueryRunner):
                     )
 
         return variants + variants_missing
+
+    def to_actors_query(self) -> ast.SelectQuery:
+        """
+        Generate actors query for experiment funnels.
+
+        This method reuses the existing funnel actors query infrastructure by:
+        1. Creating a FunnelsQuery-like structure from the ExperimentFunnelMetric
+        2. Building a FunnelQueryContext with the experiment parameters
+        3. Delegating to FunnelUDF.actor_query() which handles all the complexity
+
+        This ensures we get the same behavior as regular funnel actors queries,
+        including proper conversion/dropoff filtering and recording support.
+        """
+        # Ensure actors_query is set (should be set by InsightActorsQueryRunner before calling this)
+        if self.actors_query is None:
+            raise ValidationError("actors_query must be set before calling to_actors_query()")
+
+        # Only support funnel metrics for now
+        if not isinstance(self.metric, ExperimentFunnelMetric):
+            raise ValidationError("Actors query only supported for funnel experiment metrics")
+
+        # Import here to avoid circular dependencies
+        from posthog.schema import BreakdownFilter, BreakdownType, FunnelsActorsQuery, FunnelsFilter, FunnelsQuery
+
+        from posthog.hogql_queries.insights.funnels import FunnelUDF
+        from posthog.hogql_queries.insights.funnels.funnel_query_context import FunnelQueryContext
+
+        # Build a FunnelsQuery from the experiment configuration
+        # This allows us to reuse all the existing funnel query infrastructure
+        # Note: We add breakdown by feature flag to enable variant filtering via funnelStepBreakdown
+        funnels_query = FunnelsQuery(
+            kind="FunnelsQuery",
+            series=self.metric.series,
+            dateRange=self.date_range,
+            filterTestAccounts=self.experiment.exposure_criteria.get("filterTestAccounts", True)
+            if self.experiment.exposure_criteria
+            else False,
+            funnelsFilter=FunnelsFilter(
+                funnelOrderType=self.metric.funnel_order_type,
+                funnelWindowInterval=self.metric.conversion_window or 14,
+                funnelWindowIntervalUnit=self.metric.conversion_window_unit,
+            ),
+            # Set aggregation group type if experiment uses groups
+            aggregation_group_type_index=self.group_type_index,
+            # CRITICAL: Add breakdown by feature flag to enable filtering by variant
+            # Without this, funnelStepBreakdown won't work to filter actors by variant
+            breakdownFilter=BreakdownFilter(
+                breakdown=f"$feature/{self.feature_flag.key}",
+                breakdown_type=BreakdownType.EVENT,
+            ),
+        )
+
+        # Create a FunnelQueryContext
+        funnel_context = FunnelQueryContext(
+            query=funnels_query,
+            team=self.team,
+            timings=self.timings,
+            modifiers=self.modifiers,
+            limit_context=self.limit_context,
+        )
+
+        # Adapt the ExperimentActorsQuery to FunnelsActorsQuery format
+        # This maps variant filtering (funnelStepBreakdown) to the breakdown system
+        funnel_actors_query = FunnelsActorsQuery(
+            kind="FunnelsActorsQuery",
+            source=funnels_query,
+            funnelStep=self.actors_query.funnelStep,
+            funnelStepBreakdown=self.actors_query.funnelStepBreakdown,  # Variant key
+            includeRecordings=self.actors_query.includeRecordings,
+        )
+
+        # Set the actors query on the context
+        funnel_context.actorsQuery = funnel_actors_query
+
+        # Use FunnelUDF to generate the actors query
+        # This is the same code path used by regular funnel actors queries
+        funnel_udf = FunnelUDF(context=funnel_context)
+        return funnel_udf.actor_query()
 
     def to_query(self) -> ast.SelectQuery:
         raise ValidationError(f"Cannot convert source query of type {self.query.metric.kind} to query")

@@ -1,4 +1,4 @@
-import { actions, afterMount, connect, kea, key, listeners, path, props, selectors } from 'kea'
+import { actions, afterMount, connect, kea, key, listeners, path, props, reducers, selectors } from 'kea'
 import { DeepPartialMap, ValidationErrorType, forms } from 'kea-forms'
 import { lazyLoaders, loaders } from 'kea-loaders'
 import { router } from 'kea-router'
@@ -9,6 +9,7 @@ import { LemonDialog } from '@posthog/lemon-ui'
 import api from 'lib/api'
 import { CyclotronJobInputsValidation } from 'lib/components/CyclotronJob/CyclotronJobInputsValidation'
 import { SetupTaskId, globalSetupLogic } from 'lib/components/ProductSetup'
+import { dayjs } from 'lib/dayjs'
 import { lemonToast } from 'lib/lemon-ui/LemonToast'
 import { publicWebhooksHostOrigin } from 'lib/utils/apiHost'
 import { LiquidRenderer } from 'lib/utils/liquid'
@@ -20,8 +21,23 @@ import { userLogic } from 'scenes/userLogic'
 
 import { HogFunctionTemplateType } from '~/types'
 
+import { getRegisteredTriggerTypes } from './hogflows/registry/triggers/triggerTypeRegistry'
+import {
+    DEFAULT_STATE,
+    isOneTimeSchedule,
+    ONE_TIME_RRULE,
+    parseRRuleToState,
+    stateToRRule,
+} from './hogflows/steps/components/rrule-helpers'
+import type { ScheduleState } from './hogflows/steps/components/rrule-helpers'
 import { HogFlowActionSchema, isFunctionAction, isTriggerFunction } from './hogflows/steps/types'
-import { type HogFlow, type HogFlowAction, HogFlowActionValidationResult, type HogFlowEdge } from './hogflows/types'
+import {
+    type HogFlow,
+    type HogFlowAction,
+    HogFlowActionValidationResult,
+    type HogFlowEdge,
+    type HogFlowSchedule,
+} from './hogflows/types'
 import type { workflowLogicType } from './workflowLogicType'
 import { workflowSceneLogic } from './workflowSceneLogic'
 import { workflowsLogic } from './workflowsLogic'
@@ -73,7 +89,7 @@ export const NEW_WORKFLOW: HogFlow = {
             type: 'continue',
         },
     ],
-    conversion: { window_minutes: 0, filters: [] },
+    conversion: { window_minutes: null, filters: [] },
     exit_condition: 'exit_only_at_end',
     version: 1,
     status: 'draft',
@@ -113,9 +129,12 @@ export function sanitizeWorkflow(
 }
 
 export const workflowLogic = kea<workflowLogicType>([
-    path(['products', 'workflows', 'frontend', 'Workflows', 'workflowLogic']),
+    path((key) => ['products', 'workflows', 'frontend', 'Workflows', 'workflowLogic', key]),
     props({ id: 'new', tabId: 'default' } as WorkflowLogicProps),
-    key((props) => `workflow-${props.id || 'new'}-${props.tabId}`),
+    key(
+        (props) =>
+            `workflow-${props.id || 'new'}-${props.tabId || 'default'}-${props.templateId || 'default'}-${props.editTemplateId || 'default'}`
+    ),
     connect(() => ({
         values: [userLogic, ['user'], projectLogic, ['currentProjectId']],
         actions: [workflowsLogic, ['archiveWorkflow']],
@@ -130,6 +149,12 @@ export const workflowLogic = kea<workflowLogicType>([
         setWorkflowActionEdges: (actionId: string, edges: HogFlow['edges']) => ({ actionId, edges }),
         // NOTE: This is a wrapper for setWorkflowValues, to get around some weird typegen issues
         setWorkflowInfo: (workflow: Partial<HogFlow>) => ({ workflow }),
+        setScheduleState: (scheduleState: ScheduleState) => ({ scheduleState }),
+        setScheduleStartsAt: (startsAt: string | null) => ({ startsAt }),
+        setScheduleStartsAtFromPicker: (pickerDate: string | null) => ({ pickerDate }),
+        setScheduleTimezone: (timezone: string, previousTimezone?: string) => ({ timezone, previousTimezone }),
+        setScheduleRepeating: (repeating: boolean) => ({ repeating }),
+        setSchedules: (schedules: HogFlowSchedule[]) => ({ schedules }),
         saveWorkflowPartial: (workflow: Partial<HogFlow>) => ({ workflow }),
         triggerManualWorkflow: (variables: Record<string, any>, scheduledAt?: string | null) => ({
             variables,
@@ -228,12 +253,14 @@ export const workflowLogic = kea<workflowLogicType>([
     forms(({ actions, values }) => ({
         workflow: {
             defaults: NEW_WORKFLOW,
-            errors: ({ name, actions }) => {
+            errors: ({ name, actions, status }) => {
                 const errors = {
                     name: !name ? 'Name is required' : undefined,
-                    actions: actions.some((action) => !(values.actionValidationErrorsById[action.id]?.valid ?? true))
-                        ? 'Some fields need work'
-                        : undefined,
+                    actions:
+                        status === 'active' &&
+                        actions.some((action) => !(values.actionValidationErrorsById[action.id]?.valid ?? true))
+                            ? 'Some fields need work'
+                            : undefined,
                 } as DeepPartialMap<HogFlow, ValidationErrorType>
 
                 return errors
@@ -247,8 +274,93 @@ export const workflowLogic = kea<workflowLogicType>([
             },
         },
     })),
+    reducers({
+        schedules: [
+            [] as HogFlowSchedule[],
+            {
+                setSchedules: (_, { schedules }) => schedules,
+            },
+        ],
+        scheduleState: [
+            { ...DEFAULT_STATE } as ScheduleState,
+            {
+                setScheduleState: (_, { scheduleState }) => scheduleState,
+                setSchedules: (_, { schedules }) => {
+                    const schedule = schedules[0]
+                    if (schedule && !isOneTimeSchedule(schedule.rrule)) {
+                        return parseRRuleToState(schedule.rrule)
+                    }
+                    return { ...DEFAULT_STATE }
+                },
+            },
+        ],
+        scheduleStartsAt: [
+            null as string | null,
+            {
+                setScheduleStartsAt: (_, { startsAt }) => startsAt,
+                setSchedules: (_, { schedules }) => schedules[0]?.starts_at ?? null,
+            },
+        ],
+        scheduleTimezone: [
+            dayjs.tz.guess() as string,
+            {
+                setScheduleTimezone: (_, { timezone }) => timezone,
+                setSchedules: (_, { schedules }) => schedules[0]?.timezone ?? dayjs.tz.guess(),
+            },
+        ],
+        isScheduleRepeating: [
+            false as boolean,
+            {
+                setScheduleRepeating: (_, { repeating }) => repeating,
+                setSchedules: (_, { schedules }) => {
+                    const schedule = schedules[0]
+                    return !!schedule && !isOneTimeSchedule(schedule.rrule)
+                },
+            },
+        ],
+    }),
     selectors({
         logicProps: [() => [(_, props: WorkflowLogicProps) => props], (props): WorkflowLogicProps => props],
+        currentSchedule: [(s) => [s.schedules], (schedules): HogFlowSchedule | null => schedules[0] ?? null],
+        pendingSchedule: [
+            (s) => [s.currentSchedule, s.scheduleState, s.scheduleStartsAt, s.scheduleTimezone, s.isScheduleRepeating],
+            (
+                currentSchedule,
+                scheduleState,
+                scheduleStartsAt,
+                scheduleTimezone,
+                isScheduleRepeating
+            ): { rrule: string; starts_at: string; timezone?: string } | null | false => {
+                // Build what the schedule would look like from current reducer state
+                if (!scheduleStartsAt) {
+                    // No start date set - if there was a saved schedule, this means delete it
+                    return currentSchedule ? null : false
+                }
+
+                const rrule = isScheduleRepeating ? stateToRRule(scheduleState, scheduleStartsAt) : ONE_TIME_RRULE
+                const newSchedule = { rrule, starts_at: scheduleStartsAt, timezone: scheduleTimezone }
+
+                // Compare with saved schedule to detect changes
+                if (!currentSchedule) {
+                    // No saved schedule exists, so any non-null value is a pending change
+                    return newSchedule
+                }
+
+                const savedRRule = currentSchedule.rrule
+                const savedStartsAt = currentSchedule.starts_at
+                const savedTimezone = currentSchedule.timezone ?? dayjs.tz.guess()
+
+                if (rrule === savedRRule && scheduleStartsAt === savedStartsAt && scheduleTimezone === savedTimezone) {
+                    return false // No changes
+                }
+
+                return newSchedule
+            },
+        ],
+        hasUnsavedChanges: [
+            (s) => [s.workflowChanged, s.pendingSchedule],
+            (formChanged, pendingSchedule): boolean => formChanged || pendingSchedule !== false,
+        ],
         workflowLoading: [(s) => [s.originalWorkflowLoading], (originalWorkflowLoading) => originalWorkflowLoading],
         edgesByActionId: [
             (s) => [s.workflow],
@@ -298,9 +410,15 @@ export const workflowLogic = kea<workflowLogicType>([
                             const emailTemplating = action.config.inputs?.email?.templating
 
                             const emailTemplateErrors: Partial<EmailTemplate> = {
-                                html: !emailValue?.html
-                                    ? 'HTML is required'
-                                    : getTemplatingError(emailValue?.html, emailTemplating),
+                                html:
+                                    !emailValue?.html && !emailValue?.text
+                                        ? 'HTML or plain text is required'
+                                        : emailValue?.html
+                                          ? getTemplatingError(emailValue?.html, emailTemplating)
+                                          : undefined,
+                                text: emailValue?.text
+                                    ? getTemplatingError(emailValue?.text, emailTemplating)
+                                    : undefined,
                                 subject: !emailValue?.subject
                                     ? 'Subject is required'
                                     : getTemplatingError(emailValue?.subject, emailTemplating),
@@ -346,9 +464,17 @@ export const workflowLogic = kea<workflowLogicType>([
                         }
 
                         if (action.type === 'trigger') {
-                            // custom validation here that we can't easily express in the schema
-                            if (action.config.type === 'event') {
-                                if (!action.config.filters.events?.length && !action.config.filters.actions?.length) {
+                            const registeredTypes = getRegisteredTriggerTypes()
+                            const matchingType = registeredTypes.find((t) => t.matchConfig?.(action.config))
+
+                            if (matchingType?.validate) {
+                                const triggerValidation = matchingType.validate(action.config)
+                                if (triggerValidation && !triggerValidation.valid) {
+                                    result.valid = false
+                                    result.errors = { ...result.errors, ...triggerValidation.errors }
+                                }
+                            } else if (action.config.type === 'event') {
+                                if (!action.config.filters?.events?.length && !action.config.filters?.actions?.length) {
                                     result.valid = false
                                     result.errors = {
                                         filters: 'At least one event or action is required',
@@ -379,6 +505,16 @@ export const workflowLogic = kea<workflowLogicType>([
             },
         ],
 
+        workflowHasActionErrors: [
+            (s) => [s.workflow, s.actionValidationErrorsById],
+            (
+                workflow: HogFlow,
+                actionValidationErrorsById: Record<string, HogFlowActionValidationResult | null>
+            ): boolean => {
+                return workflow.actions.some((action) => !(actionValidationErrorsById[action.id]?.valid ?? true))
+            },
+        ],
+
         triggerAction: [
             (s) => [s.workflow],
             (workflow): TriggerAction | null => {
@@ -394,16 +530,74 @@ export const workflowLogic = kea<workflowLogicType>([
         ],
     }),
     listeners(({ actions, values, props }) => ({
+        setScheduleStartsAtFromPicker: ({ pickerDate }) => {
+            if (!pickerDate) {
+                actions.setScheduleStartsAt(null)
+                return
+            }
+            // The picker returns browser-local time. Reinterpret as the schedule timezone.
+            const wallClock = dayjs(pickerDate).startOf('minute').format('YYYY-MM-DDTHH:mm:ss')
+            actions.setScheduleStartsAt(dayjs.tz(wallClock, values.scheduleTimezone).toISOString())
+        },
+        setScheduleTimezone: ({ timezone, previousTimezone }) => {
+            // When timezone changes, keep the wall-clock time the same by reinterpreting
+            // the current starts_at in the new timezone.
+            const oldTz = previousTimezone ?? dayjs.tz.guess()
+            if (values.scheduleStartsAt) {
+                const wallClock = dayjs(values.scheduleStartsAt).tz(oldTz).format('YYYY-MM-DDTHH:mm:ss')
+                actions.setScheduleStartsAt(dayjs.tz(wallClock, timezone).toISOString())
+            }
+        },
+        resetWorkflow: () => {
+            // Re-initialize schedule reducers from the saved schedule.
+            // Using setSchedules resets all reducers atomically without triggering
+            // the setScheduleTimezone listener's wall-clock reinterpretation.
+            actions.setSchedules(values.schedules)
+        },
         saveWorkflowPartial: async ({ workflow }) => {
-            actions.saveWorkflow({
-                ...values.workflow,
-                ...workflow,
-            })
+            const merged = { ...values.workflow, ...workflow }
+            if (merged.status === 'active' && values.workflowHasActionErrors) {
+                lemonToast.error('Fix all errors before enabling')
+                return
+            }
+            actions.saveWorkflow(merged)
         },
         loadWorkflowSuccess: async ({ originalWorkflow }) => {
             actions.resetWorkflow(originalWorkflow)
+            if (originalWorkflow.id && originalWorkflow.trigger?.type === 'batch') {
+                try {
+                    const schedules = await api.hogFlows.getHogFlowSchedules(originalWorkflow.id)
+                    actions.setSchedules(schedules)
+                } catch {
+                    // Schedules are non-critical, don't block workflow loading
+                }
+            }
         },
         saveWorkflowSuccess: async ({ originalWorkflow }) => {
+            // Save pending schedule changes
+            const workflowId = originalWorkflow.id
+            const pendingSchedule = values.pendingSchedule
+            const existingScheduleId = values.currentSchedule?.id
+            const hasScheduleChanges = pendingSchedule !== false && !!workflowId
+
+            if (hasScheduleChanges) {
+                try {
+                    if (pendingSchedule === null && existingScheduleId) {
+                        await api.hogFlows.deleteHogFlowSchedule(workflowId, existingScheduleId)
+                    } else if (pendingSchedule !== null && existingScheduleId) {
+                        await api.hogFlows.updateHogFlowSchedule(workflowId, existingScheduleId, pendingSchedule)
+                    } else if (pendingSchedule !== null) {
+                        await api.hogFlows.createHogFlowSchedule(workflowId, pendingSchedule)
+                    }
+
+                    const schedules = await api.hogFlows.getHogFlowSchedules(workflowId)
+                    actions.setSchedules(schedules)
+                } catch (e) {
+                    console.error('Failed to save schedule', e)
+                    lemonToast.error('Workflow saved, but schedule could not be updated')
+                }
+            }
+
             const tasksToMarkAsCompleted: SetupTaskId[] = []
             lemonToast.success('Workflow saved')
             if (props.id === 'new' && originalWorkflow.id) {

@@ -58,7 +58,8 @@
         GROUP BY aggregation_target
         HAVING ifNull(greaterOrEquals(step_reached, 0), 0))
      GROUP BY breakdown
-     ORDER BY step_2 DESC, step_1 DESC)
+     ORDER BY step_2 DESC,
+              step_1 DESC)
   GROUP BY final_prop
   ORDER BY step_2 DESC,
            step_1 DESC
@@ -66,11 +67,10 @@
                     readonly=2,
                     max_execution_time=60,
                     allow_experimental_object_type=1,
-                    format_csv_allow_double_quotes=0,
                     max_ast_elements=4000000,
                     max_expanded_ast_elements=4000000,
                     max_bytes_before_external_group_by=23622320128,
-                    allow_experimental_analyzer=1,
+                    enable_analyzer=1,
                     transform_null_in=1,
                     optimize_min_equality_disjunction_chain_length=4294967295,
                     allow_experimental_join_condition=1,
@@ -136,7 +136,8 @@
         GROUP BY aggregation_target
         HAVING ifNull(greaterOrEquals(step_reached, 0), 0))
      GROUP BY breakdown
-     ORDER BY step_2 DESC, step_1 DESC)
+     ORDER BY step_2 DESC,
+              step_1 DESC)
   GROUP BY final_prop
   ORDER BY step_2 DESC,
            step_1 DESC
@@ -144,11 +145,10 @@
                     readonly=2,
                     max_execution_time=60,
                     allow_experimental_object_type=1,
-                    format_csv_allow_double_quotes=0,
                     max_ast_elements=4000000,
                     max_expanded_ast_elements=4000000,
                     max_bytes_before_external_group_by=23622320128,
-                    allow_experimental_analyzer=1,
+                    enable_analyzer=1,
                     transform_null_in=1,
                     optimize_min_equality_disjunction_chain_length=4294967295,
                     allow_experimental_join_condition=1,
@@ -214,7 +214,8 @@
         GROUP BY aggregation_target
         HAVING ifNull(greaterOrEquals(step_reached, 0), 0))
      GROUP BY breakdown
-     ORDER BY step_2 DESC, step_1 DESC)
+     ORDER BY step_2 DESC,
+              step_1 DESC)
   GROUP BY final_prop
   ORDER BY step_2 DESC,
            step_1 DESC
@@ -222,11 +223,10 @@
                     readonly=2,
                     max_execution_time=60,
                     allow_experimental_object_type=1,
-                    format_csv_allow_double_quotes=0,
                     max_ast_elements=4000000,
                     max_expanded_ast_elements=4000000,
                     max_bytes_before_external_group_by=23622320128,
-                    allow_experimental_analyzer=1,
+                    enable_analyzer=1,
                     transform_null_in=1,
                     optimize_min_equality_disjunction_chain_length=4294967295,
                     allow_experimental_join_condition=1,
@@ -302,7 +302,8 @@
         GROUP BY aggregation_target
         HAVING ifNull(greaterOrEquals(step_reached, 0), 0))
      GROUP BY breakdown
-     ORDER BY step_2 DESC, step_1 DESC)
+     ORDER BY step_2 DESC,
+              step_1 DESC)
   GROUP BY final_prop
   ORDER BY step_2 DESC,
            step_1 DESC
@@ -310,11 +311,10 @@
                     readonly=2,
                     max_execution_time=60,
                     allow_experimental_object_type=1,
-                    format_csv_allow_double_quotes=0,
                     max_ast_elements=4000000,
                     max_expanded_ast_elements=4000000,
                     max_bytes_before_external_group_by=23622320128,
-                    allow_experimental_analyzer=1,
+                    enable_analyzer=1,
                     transform_null_in=1,
                     optimize_min_equality_disjunction_chain_length=4294967295,
                     allow_experimental_join_condition=1,
@@ -390,7 +390,8 @@
         GROUP BY aggregation_target
         HAVING ifNull(greaterOrEquals(step_reached, 0), 0))
      GROUP BY breakdown
-     ORDER BY step_2 DESC, step_1 DESC)
+     ORDER BY step_2 DESC,
+              step_1 DESC)
   GROUP BY final_prop
   ORDER BY step_2 DESC,
            step_1 DESC
@@ -398,11 +399,10 @@
                     readonly=2,
                     max_execution_time=60,
                     allow_experimental_object_type=1,
-                    format_csv_allow_double_quotes=0,
                     max_ast_elements=4000000,
                     max_expanded_ast_elements=4000000,
                     max_bytes_before_external_group_by=23622320128,
-                    allow_experimental_analyzer=1,
+                    enable_analyzer=1,
                     transform_null_in=1,
                     optimize_min_equality_disjunction_chain_length=4294967295,
                     allow_experimental_join_condition=1,
@@ -478,7 +478,8 @@
         GROUP BY aggregation_target
         HAVING ifNull(greaterOrEquals(step_reached, 0), 0))
      GROUP BY breakdown
-     ORDER BY step_2 DESC, step_1 DESC)
+     ORDER BY step_2 DESC,
+              step_1 DESC)
   GROUP BY final_prop
   ORDER BY step_2 DESC,
            step_1 DESC
@@ -486,11 +487,10 @@
                     readonly=2,
                     max_execution_time=60,
                     allow_experimental_object_type=1,
-                    format_csv_allow_double_quotes=0,
                     max_ast_elements=4000000,
                     max_expanded_ast_elements=4000000,
                     max_bytes_before_external_group_by=23622320128,
-                    allow_experimental_analyzer=1,
+                    enable_analyzer=1,
                     transform_null_in=1,
                     optimize_min_equality_disjunction_chain_length=4294967295,
                     allow_experimental_join_condition=1,
@@ -549,7 +549,8 @@
         GROUP BY aggregation_target
         HAVING ifNull(greaterOrEquals(step_reached, 0), 0))
      GROUP BY breakdown
-     ORDER BY step_2 DESC, step_1 DESC)
+     ORDER BY step_2 DESC,
+              step_1 DESC)
   GROUP BY final_prop
   ORDER BY step_2 DESC,
            step_1 DESC
@@ -557,11 +558,10 @@
                     readonly=2,
                     max_execution_time=60,
                     allow_experimental_object_type=1,
-                    format_csv_allow_double_quotes=0,
                     max_ast_elements=4000000,
                     max_expanded_ast_elements=4000000,
                     max_bytes_before_external_group_by=23622320128,
-                    allow_experimental_analyzer=1,
+                    enable_analyzer=1,
                     transform_null_in=1,
                     optimize_min_equality_disjunction_chain_length=4294967295,
                     allow_experimental_join_condition=1,
@@ -620,7 +620,8 @@
         GROUP BY aggregation_target
         HAVING ifNull(greaterOrEquals(step_reached, 0), 0))
      GROUP BY breakdown
-     ORDER BY step_2 DESC, step_1 DESC)
+     ORDER BY step_2 DESC,
+              step_1 DESC)
   GROUP BY final_prop
   ORDER BY step_2 DESC,
            step_1 DESC
@@ -628,11 +629,10 @@
                     readonly=2,
                     max_execution_time=60,
                     allow_experimental_object_type=1,
-                    format_csv_allow_double_quotes=0,
                     max_ast_elements=4000000,
                     max_expanded_ast_elements=4000000,
                     max_bytes_before_external_group_by=23622320128,
-                    allow_experimental_analyzer=1,
+                    enable_analyzer=1,
                     transform_null_in=1,
                     optimize_min_equality_disjunction_chain_length=4294967295,
                     allow_experimental_join_condition=1,
@@ -691,7 +691,8 @@
         GROUP BY aggregation_target
         HAVING ifNull(greaterOrEquals(step_reached, 0), 0))
      GROUP BY breakdown
-     ORDER BY step_2 DESC, step_1 DESC)
+     ORDER BY step_2 DESC,
+              step_1 DESC)
   GROUP BY final_prop
   ORDER BY step_2 DESC,
            step_1 DESC
@@ -699,11 +700,10 @@
                     readonly=2,
                     max_execution_time=60,
                     allow_experimental_object_type=1,
-                    format_csv_allow_double_quotes=0,
                     max_ast_elements=4000000,
                     max_expanded_ast_elements=4000000,
                     max_bytes_before_external_group_by=23622320128,
-                    allow_experimental_analyzer=1,
+                    enable_analyzer=1,
                     transform_null_in=1,
                     optimize_min_equality_disjunction_chain_length=4294967295,
                     allow_experimental_join_condition=1,

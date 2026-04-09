@@ -8,6 +8,7 @@ from posthog.schema import (
     CustomChannelRule,
     HogQLQueryModifiers,
     InCohortVia,
+    InlineCohortCalculation,
     MaterializationMode,
     PersonsArgMaxVersion,
     PropertyGroupsMode,
@@ -68,24 +69,7 @@ def create_default_modifiers_for_team(
                     setattr(modifiers, key, value)
 
     if modifiers.optimizeProjections is None:
-        modifiers.optimizeProjections = posthoganalytics.feature_enabled(
-            "projection-pushdown",
-            str(team.uuid),
-            groups={
-                "organization": str(team.organization_id),
-                "project": str(team.id),
-            },
-            group_properties={
-                "organization": {
-                    "id": str(team.organization_id),
-                },
-                "project": {
-                    "id": str(team.id),
-                },
-            },
-            only_evaluate_locally=True,
-            send_feature_flag_events=False,
-        )
+        modifiers.optimizeProjections = True
 
     set_default_modifier_values(modifiers, team)
 
@@ -115,13 +99,10 @@ def set_default_modifier_values(modifiers: HogQLQueryModifiers, team: "Team"):
         modifiers.sessionTableVersion = SessionTableVersion.AUTO
 
     if modifiers.sessionsV2JoinMode is None:
-        modifiers.sessionsV2JoinMode = SessionsV2JoinMode.STRING
+        modifiers.sessionsV2JoinMode = SessionsV2JoinMode.UUID
 
     if modifiers.useMaterializedViews is None:
         modifiers.useMaterializedViews = True
-
-    if modifiers.usePresortedEventsTable is None:
-        modifiers.usePresortedEventsTable = False
 
     if modifiers.propertyGroupsMode is None and is_cloud():
         modifiers.propertyGroupsMode = PropertyGroupsMode.OPTIMIZED
@@ -129,8 +110,8 @@ def set_default_modifier_values(modifiers: HogQLQueryModifiers, team: "Team"):
     if modifiers.convertToProjectTimezone is None:
         modifiers.convertToProjectTimezone = True
 
-    if modifiers.optimizeProjections is None:
-        modifiers.optimizeProjections = False
+    if modifiers.inlineCohortCalculation is None:
+        modifiers.inlineCohortCalculation = InlineCohortCalculation.AUTO
 
 
 def set_default_in_cohort_via(modifiers: HogQLQueryModifiers) -> HogQLQueryModifiers:

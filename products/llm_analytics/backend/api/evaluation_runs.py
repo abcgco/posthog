@@ -1,7 +1,6 @@
 import time
 import asyncio
 from datetime import timedelta
-from typing import cast
 
 from django.conf import settings
 
@@ -15,8 +14,9 @@ from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
 from posthog.api.monitoring import monitor
 from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.clickhouse.client import query_with_columns
+from posthog.clickhouse.query_tagging import Feature, Product, tag_queries
 from posthog.event_usage import report_user_action
-from posthog.models import User
+from posthog.permissions import AccessControlPermission
 from posthog.temporal.common.client import sync_connect
 from posthog.temporal.llm_analytics.run_evaluation import RunEvaluationInputs
 
@@ -37,7 +37,7 @@ class EvaluationRunRequestSerializer(serializers.Serializer):
 
 class EvaluationRunViewSet(TeamAndOrgViewSetMixin, viewsets.ViewSet):
     scope_object = "evaluation"
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, AccessControlPermission]
 
     @llma_track_latency("llma_evaluation_runs_create")
     @monitor(feature=None, endpoint="llma_evaluation_runs_create", method="POST")
@@ -83,6 +83,7 @@ class EvaluationRunViewSet(TeamAndOrgViewSetMixin, viewsets.ViewSet):
             where_clauses.append("distinct_id = %(distinct_id)s")
             params["distinct_id"] = distinct_id
 
+        tag_queries(product=Product.LLM_ANALYTICS, feature=Feature.QUERY)
         query_result = query_with_columns(
             f"""
             SELECT
@@ -114,7 +115,8 @@ class EvaluationRunViewSet(TeamAndOrgViewSetMixin, viewsets.ViewSet):
         )
 
         # Generate unique workflow ID
-        workflow_id = f"{evaluation_id}-{target_event_id}-manual-{int(time.time() * 1000)}"
+        prefix = "llma-hog-eval" if evaluation.evaluation_type == "hog" else "llma-llm-eval"
+        workflow_id = f"{prefix}-{evaluation_id}-{target_event_id}-manual-{int(time.time() * 1000)}"
 
         # Start Temporal workflow
         try:
@@ -141,16 +143,18 @@ class EvaluationRunViewSet(TeamAndOrgViewSetMixin, viewsets.ViewSet):
 
             # Track evaluation run triggered
             report_user_action(
-                cast(User, request.user),
+                request.user,
                 "llma evaluation run triggered",
                 {
                     "evaluation_id": evaluation_id,
                     "evaluation_name": evaluation.name,
+                    "evaluation_type": evaluation.evaluation_type,
                     "target_event_id": target_event_id,
                     "workflow_id": workflow_id,
                     "trigger_type": "manual",
                 },
-                self.team,
+                team=self.team,
+                request=self.request,
             )
 
             return Response(

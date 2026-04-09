@@ -15,7 +15,7 @@ import { EventsQuery } from '~/queries/schema/schema-general'
 import { ActivityScope, ActivityTab, InsightShortId, PropertyFilterType, ReplayTabs } from '~/types'
 
 import { BillingSectionId } from './billing/types'
-import { DataPipelinesSceneTab } from './data-pipelines/DataPipelinesScene'
+import type { DataWarehouseSourceSceneTab } from './data-warehouse/settings/DataWarehouseSourceScene'
 
 export const emptySceneParams = { params: {}, searchParams: {}, hashParams: {} }
 
@@ -42,6 +42,13 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         description:
             'Track all changes and activities in your organization with detailed filtering and export capabilities.',
     },
+    [Scene.AgenticAuthorize]: {
+        name: 'Authorize Stripe',
+        layout: 'plain',
+        projectBased: false,
+        organizationBased: false,
+        allowUnauthenticated: true,
+    },
     [Scene.AsyncMigrations]: { instanceLevel: true },
     [Scene.MaterializedColumns]: {
         projectBased: true,
@@ -60,6 +67,29 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         name: 'Approval',
         description: 'Review and approve a change request',
     },
+    [Scene.WebScripts]: {
+        projectBased: true,
+        name: 'Web scripts',
+        description: 'Web scripts allow you to add custom tags and functionality to your website using PostHog.',
+        activityScope: ActivityScope.HOG_FUNCTION,
+        defaultDocsPath: '/docs/cdp/apps',
+        iconType: 'data_pipeline',
+    },
+    [Scene.BatchExport]: {
+        projectBased: true,
+        name: 'Batch export',
+        activityScope: ActivityScope.BATCH_EXPORT,
+        iconType: 'data_pipeline',
+        defaultDocsPath: '/docs/cdp/batch-exports',
+        changelogTeamSlug: 'Batch Exports',
+    },
+    [Scene.BatchExportNew]: {
+        projectBased: true,
+        name: 'New batch export',
+        iconType: 'data_pipeline',
+        defaultDocsPath: '/docs/cdp/batch-exports',
+        changelogTeamSlug: 'Batch Exports',
+    },
     [Scene.BillingAuthorizationStatus]: {
         organizationBased: true,
         defaultDocsPath: '/pricing',
@@ -76,6 +106,12 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
     },
     [Scene.CLIAuthorize]: {
         name: 'Authorize CLI',
+        projectBased: false,
+        organizationBased: false,
+        layout: 'plain',
+    },
+    [Scene.CLILive]: {
+        name: 'Authorize Live',
         projectBased: false,
         organizationBased: false,
         layout: 'plain',
@@ -114,14 +150,6 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         name: 'Data management',
         defaultDocsPath: '/docs/data',
     },
-
-    [Scene.DataPipelines]: {
-        name: 'Data pipelines',
-        description: 'Ingest, transform, and send data between hundreds of tools.',
-        activityScope: ActivityScope.HOG_FUNCTION,
-        defaultDocsPath: '/docs/cdp',
-        iconType: 'data_pipeline',
-    },
     [Scene.DataPipelinesNew]: {
         projectBased: true,
         name: 'New data pipeline',
@@ -159,8 +187,17 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         },
     },
     [Scene.DeadLetterQueue]: { instanceLevel: true },
+    [Scene.Destinations]: {
+        projectBased: true,
+        name: 'Destinations',
+        description: 'Destinations allow you to send your data to external systems in real time.',
+        activityScope: ActivityScope.HOG_FUNCTION,
+        defaultDocsPath: '/docs/cdp/destinations',
+        iconType: 'data_pipeline',
+    },
     [Scene.DebugHog]: { projectBased: true, name: 'Hog Repl' },
     [Scene.DebugQuery]: { projectBased: true },
+
     [Scene.Error404]: { name: 'Not found', projectBased: true },
     [Scene.ErrorAccessDenied]: { name: 'Access denied' },
     [Scene.ErrorNetwork]: { name: 'Network error' },
@@ -194,7 +231,7 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
     },
     [Scene.ExperimentsSharedMetric]: {
         projectBased: true,
-        name: 'Shared metric',
+        name: '',
         defaultDocsPath: '/docs/experiments/creating-an-experiment',
         activityScope: ActivityScope.EXPERIMENT,
     },
@@ -218,14 +255,14 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         name: 'Activity',
         defaultDocsPath: '/docs/data/events',
         description: 'Explore your events or see real-time events from your app or website.',
-        iconType: 'event',
+        iconType: 'activity',
     },
     [Scene.ExploreEvents]: {
         projectBased: true,
         name: 'Explore events',
         defaultDocsPath: '/docs/data/events',
         description: 'A catalog of all user interactions with your app or website.',
-        iconType: 'event',
+        iconType: 'activity',
     },
     [Scene.ExploreSessions]: {
         projectBased: true,
@@ -261,6 +298,11 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         iconType: 'heatmap',
         description: 'Heatmaps are a way to visualize user behavior on your website.',
     },
+    [Scene.Inbox]: {
+        projectBased: true,
+        name: 'Inbox',
+        description: 'Actionable reports automatically generated from user session analysis and other signals.',
+    },
     [Scene.Heatmap]: {
         projectBased: true,
         name: 'Heatmap',
@@ -292,7 +334,7 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
     [Scene.IntegrationsRedirect]: { name: 'Integrations redirect' },
     [Scene.IngestionWarnings]: {
         projectBased: true,
-        name: 'Ingestion warnings',
+        name: 'Event ingestion warnings',
         defaultDocsPath: '/docs/data/ingestion-warnings',
         iconType: 'ingestion_warning',
         description: 'Data ingestion related warnings from past 30 days.',
@@ -310,10 +352,17 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         iconType: 'live',
     },
     [Scene.LiveDebugger]: { projectBased: true, name: 'Live debugger', defaultDocsPath: '/docs/data/events' },
-    [Scene.Login2FA]: { onlyUnauthenticated: true, name: 'Login 2FA' },
-    [Scene.EmailMFAVerify]: { onlyUnauthenticated: true },
-    [Scene.Login]: { onlyUnauthenticated: true },
+    [Scene.Login2FA]: { onlyUnauthenticated: true, name: 'Login 2FA', layout: 'plain' },
+    [Scene.EmailMFAVerify]: { onlyUnauthenticated: true, layout: 'plain' },
+    [Scene.Login]: { onlyUnauthenticated: true, layout: 'plain' },
     [Scene.Max]: { projectBased: true, name: 'Max', layout: 'app-raw-no-header', hideProjectNotice: true },
+    [Scene.Models]: {
+        projectBased: true,
+        name: 'Models',
+        description: 'Create and manage views and materialized views for transforming and organizing your data.',
+        defaultDocsPath: '/docs/data-warehouse/views/materialize',
+        iconType: 'sql_editor',
+    },
     [Scene.MoveToPostHogCloud]: { name: 'Move to PostHog Cloud', hideProjectNotice: true },
     [Scene.NewTab]: {
         projectBased: true,
@@ -353,11 +402,13 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         name: 'Confirm organization creation',
         onlyUnauthenticated: true,
         defaultDocsPath: '/docs/data/organizations-and-projects',
+        layout: 'plain',
     },
-    [Scene.PasswordResetComplete]: { onlyUnauthenticated: true },
-    [Scene.PasswordReset]: { onlyUnauthenticated: true },
+    [Scene.PasswordResetComplete]: { onlyUnauthenticated: true, layout: 'plain' },
+    [Scene.PasswordReset]: { onlyUnauthenticated: true, layout: 'plain' },
     [Scene.TwoFactorReset]: { allowUnauthenticated: true, layout: 'plain' },
-    [Scene.VercelLinkError]: { name: 'Vercel account mismatch' },
+    [Scene.VercelConnect]: { allowUnauthenticated: true, layout: 'plain', name: 'Connect to Vercel' },
+    [Scene.VercelLinkError]: { layout: 'plain', name: 'Vercel account mismatch' },
     [Scene.Person]: {
         projectBased: true,
         name: 'People',
@@ -373,7 +424,7 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         defaultDocsPath: '/docs/data/persons',
         iconType: 'persons',
     },
-    [Scene.PreflightCheck]: { onlyUnauthenticated: true },
+    [Scene.PreflightCheck]: { onlyUnauthenticated: true, layout: 'plain' },
     [Scene.ProjectCreateFirst]: {
         name: 'Project creation',
         organizationBased: true,
@@ -382,11 +433,17 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
     [Scene.ProjectHomepage]: {
         projectBased: true,
         name: 'Homepage',
+        layout: 'app-raw-no-header',
     },
     [Scene.PropertyDefinitionEdit]: {
         projectBased: true,
         name: 'Data management',
         activityScope: ActivityScope.PROPERTY_DEFINITION,
+    },
+    [Scene.SqlVariableEdit]: {
+        projectBased: true,
+        name: 'SQL variable',
+        defaultDocsPath: '/docs/sql',
     },
     [Scene.PropertyDefinitions]: {
         projectBased: true,
@@ -444,6 +501,11 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         layout: 'plain',
         hideProjectNotice: true,
     },
+    [Scene.ResourceTransfer]: {
+        projectBased: true,
+        name: 'Copy to project',
+        layout: 'app-container',
+    },
     [Scene.RevenueAnalytics]: {
         projectBased: true,
         name: 'Revenue analytics',
@@ -467,20 +529,53 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
         defaultDocsPath: '/docs/product-analytics',
         iconType: 'product_analytics',
     },
+    [Scene.Health]: {
+        projectBased: true,
+        name: 'Health',
+        description: 'Monitor the health of your PostHog integrations.',
+        iconType: 'health',
+    },
+    [Scene.HealthCategoryDetail]: {
+        projectBased: true,
+        name: 'Health detail',
+        iconType: 'health',
+    },
+    [Scene.PipelineStatus]: {
+        projectBased: true,
+        name: 'Pipeline status',
+        description: 'Monitor the status of your data pipelines.',
+        iconType: 'pipeline_status',
+    },
+    [Scene.SdkDoctor]: {
+        projectBased: true,
+        name: 'SDK doctor',
+        iconType: 'sdk_doctor',
+        description:
+            'Monitor and maintain your PostHog SDK integrations by automatically detecting version issues, configuration problems, and implementation patterns across your applications.',
+        defaultDocsPath: '/docs/sdk-doctor',
+    },
+    [Scene.Exports]: {
+        projectBased: true,
+        name: 'Exports',
+        iconType: 'exports',
+        description:
+            'Retrieve your exports here. Exports are generated asynchronously and may take a few seconds to complete.',
+    },
     [Scene.SessionAttributionExplorer]: { projectBased: true, name: 'Session attribution explorer (beta)' },
-    [Scene.SessionProfile]: { projectBased: true, name: 'Session profile' },
+    [Scene.SessionProfile]: { projectBased: true, name: 'Session profile', iconType: 'session_profile' },
     [Scene.Settings]: { projectBased: true, name: 'Settings' },
-    [Scene.Signup]: { onlyUnauthenticated: true },
+    [Scene.Signup]: { onlyUnauthenticated: true, layout: 'plain' },
     [Scene.Site]: { projectBased: true, hideProjectNotice: true, layout: 'app-raw' },
     [Scene.StartupProgram]: { name: 'PostHog for Startups', organizationBased: true, layout: 'app-container' },
-    [Scene.SurveyTemplates]: {
-        projectBased: true,
-        name: 'New survey',
-        defaultDocsPath: '/docs/surveys/creating-surveys',
-    },
     [Scene.SurveyWizard]: {
         projectBased: true,
         name: 'Create survey',
+        layout: 'app-raw-no-header',
+        defaultDocsPath: '/docs/surveys/creating-surveys',
+    },
+    [Scene.SurveyFormBuilder]: {
+        projectBased: true,
+        name: 'Create form',
         defaultDocsPath: '/docs/surveys/creating-surveys',
     },
     [Scene.Survey]: {
@@ -510,6 +605,24 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
     },
     [Scene.SystemStatus]: { instanceLevel: true, name: 'Instance panel' },
     [Scene.ToolbarLaunch]: { projectBased: true, name: 'Launch toolbar', defaultDocsPath: '/docs/toolbar' },
+    [Scene.Sources]: {
+        projectBased: true,
+        name: 'Sources',
+        description:
+            'Import data into PostHog from external sources including webhooks, application connectors, and self-managed databases.',
+        activityScope: ActivityScope.HOG_FUNCTION,
+        defaultDocsPath: '/docs/data-warehouse',
+        iconType: 'data_pipeline',
+    },
+    [Scene.Transformations]: {
+        projectBased: true,
+        name: 'Transformations',
+        description:
+            'Transformations let you modify, filter, and enrich event data to improve data quality, privacy, and consistency.',
+        activityScope: ActivityScope.HOG_FUNCTION,
+        defaultDocsPath: '/docs/cdp/transformations',
+        iconType: 'data_pipeline',
+    },
     [Scene.Unsubscribe]: { allowUnauthenticated: true, layout: 'app-raw' },
     [Scene.VerifyEmail]: { allowUnauthenticated: true, layout: 'plain' },
     [Scene.WebAnalyticsMarketing]: {
@@ -562,11 +675,25 @@ export const sceneConfigurations: Record<Scene | string, SceneConfig> = {
     ...productConfiguration,
 }
 
-const redirectPipeline = (stage: DataPipelinesSceneTab, id: string): string => {
+const redirectPipeline = (id: string, fallbackUrl: string): string => {
+    // Hog functions (destinations & transformations)
     if (id.startsWith('hog-')) {
         return urls.hogFunction(id.replace('hog-', ''))
     }
-    return urls.dataPipelines(stage)
+    // Batch exports (destinations)
+    if (id.startsWith('batch-export-')) {
+        return urls.batchExport(id.replace('batch-export-', ''))
+    }
+    // Legacy plugins (transformations)
+    if (id.startsWith('plugin-')) {
+        return urls.legacyPlugin(id.replace('plugin-', ''))
+    }
+    // Data warehouse sources (sources)
+    if (id.startsWith('managed-') || id.startsWith('self-managed-')) {
+        return urls.dataWarehouseSource(id)
+    }
+    // Fallback to list view
+    return fallbackUrl
 }
 
 // NOTE: These redirects will fully replace the URL. If you want to keep support for query and hash params then you should use a function (not string) redirect
@@ -582,17 +709,16 @@ export const redirects: Record<
     '/activity': urls.activity(),
     '/annotations': () => urls.annotations(),
     '/annotations/:id': ({ id }) => urls.annotation(id),
-    '/apps': urls.dataPipelines('overview'),
-    '/apps/:id': urls.dataPipelines('overview'),
     '/batch_exports/:id': ({ id }) => urls.batchExport(id),
-    '/batch_exports': urls.dataPipelines('destinations'),
+    '/batch_exports': urls.destinations(),
     '/comments': () => urls.comments(),
     '/dashboards': urls.dashboards(),
     '/data-management': urls.eventDefinitions(),
-    '/data-management/database': urls.dataPipelines('sources'),
-    '/data-pipelines': urls.dataPipelines('overview'),
-    '/data-warehouse': urls.dataWarehouse(),
+    '/data-management/database': urls.sources(),
+    '/data-pipelines': urls.sources(),
     '/data-warehouse/sources/:id': ({ id }) => urls.dataWarehouseSource(id, 'schemas'),
+    '/data-warehouse/sources/:id/:tab': ({ id, tab }) =>
+        urls.dataWarehouseSource(id, tab as DataWarehouseSourceSceneTab),
     // TODO: Temporary redirect because of moving marketing Analytics out of web analytics. I will remove this after a month.
     '/web/marketing': (_, searchParams) => {
         const params = new URLSearchParams(searchParams as Record<string, string>).toString()
@@ -631,17 +757,25 @@ export const redirects: Record<
     '/live-debugger': urls.liveDebugger(),
     '/organization/members': urls.settings('organization'),
     '/organization/settings': urls.settings('organization'),
-    '/pipeline': urls.dataPipelines('overview'),
-    '/pipelines': urls.dataPipelines('overview'),
-    '/pipeline/new/site-app': urls.dataPipelinesNew('site_app'),
-    '/pipeline/sources/:id': ({ id }) => redirectPipeline('sources', id),
-    '/pipeline/destinations/:id': ({ id }) => redirectPipeline('destinations', id),
-    '/pipeline/transformations/:id': ({ id }) => redirectPipeline('transformations', id),
-    '/pipeline/sources/:id/:tab': ({ id }) => redirectPipeline('sources', id),
-    '/pipeline/destinations/:id/:tab': ({ id }) => redirectPipeline('destinations', id),
-    '/pipeline/site-apps/:id/:tab': ({ id }) => redirectPipeline('site_apps', id),
-    '/pipeline/transformations/:id/:tab': ({ id }) => redirectPipeline('transformations', id),
-    '/pipeline/data-import': urls.dataPipelines('sources'),
+    '/pipeline': urls.sources(),
+    '/pipelines': urls.sources(),
+    '/pipeline/new/site-app': urls.webScriptsNew(),
+    '/pipeline/site_apps': urls.webScripts(),
+    '/pipeline/site-apps': urls.webScripts(),
+    '/apps': urls.webScripts(),
+    '/apps/new': urls.webScriptsNew(),
+    '/pipeline/sources/:id': ({ id }) => redirectPipeline(id, urls.sources()),
+    '/pipeline/destinations/:id': ({ id }) => redirectPipeline(id, urls.destinations()),
+    '/pipeline/transformations/:id': ({ id }) => redirectPipeline(id, urls.transformations()),
+    '/pipeline/site-apps/:id': ({ id }) => redirectPipeline(id, urls.webScripts()),
+    '/pipeline/sources/:id/:tab': ({ id }) => redirectPipeline(id, urls.sources()),
+    '/pipeline/destinations/:id/:tab': ({ id }) => redirectPipeline(id, urls.destinations()),
+    '/pipeline/site-apps/:id/:tab': ({ id }) => redirectPipeline(id, urls.webScripts()),
+    '/pipeline/transformations/:id/:tab': ({ id }) => redirectPipeline(id, urls.transformations()),
+    '/pipeline/destinations': urls.destinations(),
+    '/pipeline/sources': urls.sources(),
+    '/pipeline/transformations': urls.transformations(),
+    '/pipeline/data-import': urls.sources(),
     '/project/settings': urls.settings('project'),
     '/recordings/file-playback': () => urls.replayFilePlayback(),
     '/recordings/playlists/:id': ({ id }) => urls.replayPlaylist(id),
@@ -672,6 +806,7 @@ export const routes: Record<string, [Scene | string, string]> = {
     [urls.dashboards()]: [Scene.Dashboards, 'dashboards'],
     [urls.dashboard(':id')]: [Scene.Dashboard, 'dashboard'],
     [urls.dashboardTextTile(':id', ':textTileId')]: [Scene.Dashboard, 'dashboardTextTile'],
+    [urls.dashboardButtonTile(':id', ':buttonTileId')]: [Scene.Dashboard, 'dashboardButtonTile'],
     [urls.dashboardSharing(':id')]: [Scene.Dashboard, 'dashboardSharing'],
     [urls.dashboardSubscriptions(':id')]: [Scene.Dashboard, 'dashboardSubscriptions'],
     [urls.dashboardSubscription(':id', ':subscriptionId')]: [Scene.Dashboard, 'dashboardSubscription'],
@@ -719,6 +854,7 @@ export const routes: Record<string, [Scene | string, string]> = {
         },
         {} as Record<string, [Scene, string]>
     ),
+    [urls.resourceTransfer(':resourceKind', ':resourceId')]: [Scene.ResourceTransfer, 'resourceTransfer'],
     [urls.replayFilePlayback()]: [Scene.ReplayFilePlayback, 'replayFilePlayback'],
     [urls.replayKiosk()]: [Scene.ReplayKiosk, 'replayKiosk'],
     [urls.replaySingle(':id')]: [Scene.ReplaySingle, 'replaySingle'],
@@ -743,18 +879,21 @@ export const routes: Record<string, [Scene | string, string]> = {
     [urls.experiment(':id')]: [Scene.Experiment, 'experiment'],
     [urls.experiment(':id', ':formMode')]: [Scene.Experiment, 'experiment'],
     [urls.surveys()]: [Scene.Surveys, 'surveys'],
-    [urls.surveyTemplates()]: [Scene.SurveyTemplates, 'surveyTemplates'],
     [urls.surveyWizard(':id')]: [Scene.SurveyWizard, 'surveyWizard'],
+    [urls.surveyFormBuilder(':id')]: [Scene.SurveyFormBuilder, 'surveyFormBuilder'],
     [urls.survey(':id')]: [Scene.Survey, 'survey'],
     [urls.productTours()]: [Scene.ProductTours, 'productTours'],
     [urls.productTour(':id')]: [Scene.ProductTour, 'productTour'],
     [urls.approval(':id')]: [Scene.Approval, 'approval'],
     [urls.sqlEditor()]: [Scene.SQLEditor, 'sqlEditor'],
     [urls.featureFlags()]: [Scene.FeatureFlags, 'featureFlags'],
+    [urls.featureFlagTemplates()]: ['FeatureFlagTemplates' as Scene, 'featureFlagTemplates'],
     [urls.featureFlag(':id')]: [Scene.FeatureFlag, 'featureFlag'],
     [urls.annotations()]: [Scene.DataManagement, 'annotations'],
     [urls.annotation(':id')]: [Scene.DataManagement, 'annotation'],
     [urls.comments()]: [Scene.DataManagement, 'comments'],
+    [urls.variables()]: [Scene.DataManagement, 'variables'],
+    [urls.variableEdit(':id')]: [Scene.SqlVariableEdit, 'sqlVariableEdit'],
     [urls.projectHomepage()]: [Scene.ProjectHomepage, 'projectHomepage'],
     [urls.aiHistory()]: [Scene.Max, 'maxHistory'],
     [urls.ai()]: [Scene.Max, 'max'],
@@ -774,14 +913,21 @@ export const routes: Record<string, [Scene | string, string]> = {
     [urls.instanceMetrics()]: [Scene.SystemStatus, 'instanceMetrics'],
     [urls.asyncMigrations()]: [Scene.AsyncMigrations, 'asyncMigrations'],
     [urls.asyncMigrationsFuture()]: [Scene.AsyncMigrations, 'asyncMigrationsFuture'],
+    [urls.webScripts()]: [Scene.WebScripts, 'webScripts'],
+    [urls.webScriptsNew()]: [Scene.DataPipelinesNew, 'webScriptsNew'],
     [urls.asyncMigrationsSettings()]: [Scene.AsyncMigrations, 'asyncMigrationsSettings'],
     [urls.deadLetterQueue()]: [Scene.DeadLetterQueue, 'deadLetterQueue'],
+    [urls.destinations()]: [Scene.Destinations, 'destinations'],
     [urls.materializedColumns()]: [Scene.MaterializedColumns, 'materializedColumns'],
+    [urls.models()]: [Scene.Models, 'models'],
+    [urls.sources()]: [Scene.Sources, 'sources'],
+    [urls.transformations()]: [Scene.Transformations, 'transformations'],
     [urls.toolbarLaunch()]: [Scene.ToolbarLaunch, 'toolbarLaunch'],
     [urls.site(':url')]: [Scene.Site, 'site'],
     [urls.login()]: [Scene.Login, 'login'],
     [urls.login2FA()]: [Scene.Login2FA, 'login2FA'],
     [urls.cliAuthorize()]: [Scene.CLIAuthorize, 'cliAuthorize'],
+    [urls.cliLive()]: [Scene.CLILive, 'cliLive'],
     [urls.emailMFAVerify()]: [Scene.EmailMFAVerify, 'emailMFAVerify'],
     [urls.preflight()]: [Scene.PreflightCheck, 'preflight'],
     [urls.signup()]: [Scene.Signup, 'signup'],
@@ -795,11 +941,13 @@ export const routes: Record<string, [Scene | string, string]> = {
     [urls.verifyEmail()]: [Scene.VerifyEmail, 'verifyEmail'],
     [urls.verifyEmail(':uuid')]: [Scene.VerifyEmail, 'verifyEmailWithUuid'],
     [urls.verifyEmail(':uuid', ':token')]: [Scene.VerifyEmail, 'verifyEmailWithToken'],
+    [urls.vercelConnect()]: [Scene.VercelConnect, 'vercelConnect'],
     [urls.vercelLinkError()]: [Scene.VercelLinkError, 'vercelLinkError'],
     [urls.unsubscribe()]: [Scene.Unsubscribe, 'unsubscribe'],
     [urls.integrationsRedirect(':kind')]: [Scene.IntegrationsRedirect, 'integrationsRedirect'],
     [urls.debugQuery()]: [Scene.DebugQuery, 'debugQuery'],
     [urls.debugHog()]: [Scene.DebugHog, 'debugHog'],
+
     [urls.notebook(':shortId')]: [Scene.Notebook, 'notebook'],
     [urls.notebooks()]: [Scene.Notebooks, 'notebooks'],
     [urls.canvas()]: [Scene.Canvas, 'canvas'],
@@ -816,13 +964,22 @@ export const routes: Record<string, [Scene | string, string]> = {
     [urls.sessionAttributionExplorer()]: [Scene.SessionAttributionExplorer, 'sessionAttributionExplorer'],
     [urls.wizard()]: [Scene.Wizard, 'wizard'],
     [urls.coupons(':campaign')]: [Scene.Coupons, 'coupons'],
+    [urls.health()]: [Scene.Health, 'health'],
+    [urls.inbox()]: [Scene.Inbox, 'inbox'],
+    [urls.inbox(':reportId')]: [Scene.Inbox, 'inbox'],
+    [urls.pipelineStatus()]: [Scene.PipelineStatus, 'pipelineStatus'],
+    [urls.sdkDoctor()]: [Scene.SdkDoctor, 'sdkDoctor'],
+    // Parameterized route must come after static /health/* routes
+    [urls.healthCategory(':category')]: [Scene.HealthCategoryDetail, 'healthCategoryDetail'],
+    [urls.exports()]: [Scene.Exports, 'exports'],
     [urls.startups()]: [Scene.StartupProgram, 'startupProgram'],
     [urls.startups(':referrer')]: [Scene.StartupProgram, 'startupProgramWithReferrer'],
+    [urls.agenticAuthorize()]: [Scene.AgenticAuthorize, 'agenticAuthorize'],
+    [`${urls.agenticAuthorize()}/`]: [Scene.AgenticAuthorize, 'agenticAuthorize'],
     [urls.oauthAuthorize()]: [Scene.OAuthAuthorize, 'oauthAuthorize'],
     [`${urls.oauthAuthorize()}/`]: [Scene.OAuthAuthorize, 'oauthAuthorize'],
-    [urls.dataPipelines(':kind' as any)]: [Scene.DataPipelines, 'dataPipelines'],
     [urls.dataPipelinesNew(':kind' as any)]: [Scene.DataPipelinesNew, 'dataPipelinesNew'],
-    [urls.dataWarehouse()]: [Scene.DataWarehouse, 'dataWarehouse'],
+    [urls.dataOps()]: [Scene.DataOps, 'dataOps'],
     [urls.dataWarehouseSourceNew()]: [Scene.DataWarehouseSourceNew, 'dataWarehouseSourceNew'],
     [urls.dataWarehouseSource(':id', ':tab' as any)]: [Scene.DataWarehouseSource, 'dataWarehouseSource'],
     [urls.batchExportNew(':service')]: [Scene.BatchExportNew, 'batchExportNew'],

@@ -1,10 +1,13 @@
 import { actions, connect, kea, listeners, path, props, reducers, selectors } from 'kea'
 import { actionToUrl, router, urlToAction } from 'kea-router'
 
-import { QUICK_START_PARAM } from 'lib/components/ProductSetup/globalSetupLogic'
+import { globalSetupLogic } from 'lib/components/ProductSetup/globalSetupLogic'
+import { FEATURE_FLAGS } from 'lib/constants'
+import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
+import { isKeyOf } from 'lib/utils'
 import { eventUsageLogic } from 'lib/utils/eventUsageLogic'
-import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { billingLogic } from 'scenes/billing/billingLogic'
+import { preflightLogic } from 'scenes/PreflightCheck/preflightLogic'
 import { Scene } from 'scenes/sceneTypes'
 import { teamLogic } from 'scenes/teamLogic'
 import { urls } from 'scenes/urls'
@@ -15,6 +18,7 @@ import { ProductKey } from '~/queries/schema/schema-general'
 import { Breadcrumb, OnboardingProduct, OnboardingStepKey } from '~/types'
 
 import type { onboardingLogicType } from './onboardingLogicType'
+import { postOnboardingModalLogic } from './postOnboardingModalLogic'
 import { availableOnboardingProducts } from './utils'
 
 /** Interface for onboarding step components that have a static stepKey property */
@@ -55,35 +59,26 @@ export const stepKeyToTitle = (stepKey?: OnboardingStepKey): undefined | string 
 export type OnboardingStepType = OnboardingStepElement
 
 export const getOnboardingCompleteRedirectUri = (productKey: ProductKey): string => {
-    let baseUrl: string
     switch (productKey) {
         case ProductKey.PRODUCT_ANALYTICS:
-            baseUrl = urls.insightOptions()
-            break
+            return urls.insightOptions()
         case ProductKey.WEB_ANALYTICS:
-            baseUrl = urls.webAnalytics()
-            break
+            return urls.webAnalytics()
         case ProductKey.SESSION_REPLAY:
-            baseUrl = urls.replay()
-            break
+            return urls.replay()
         case ProductKey.FEATURE_FLAGS:
-            baseUrl = urls.featureFlag('new')
-            break
+            return urls.featureFlags()
         case ProductKey.SURVEYS:
-            baseUrl = urls.surveyTemplates()
-            break
+            return urls.surveyWizard()
         case ProductKey.ERROR_TRACKING:
-            baseUrl = urls.errorTracking()
-            break
+            return urls.errorTracking()
         case ProductKey.LLM_ANALYTICS:
-            baseUrl = urls.llmAnalyticsDashboard()
-            break
+            return urls.llmAnalyticsDashboard()
+        case ProductKey.WORKFLOWS:
+            return urls.workflows()
         default:
-            baseUrl = urls.default()
+            return urls.default()
     }
-
-    // Append quickstart param to open the quick start popover after onboarding
-    return `${baseUrl}?${QUICK_START_PARAM}=true`
 }
 
 export const onboardingLogic = kea<onboardingLogicType>([
@@ -99,9 +94,13 @@ export const onboardingLogic = kea<onboardingLogicType>([
             userLogic,
             ['user'],
             preflightLogic,
-            ['isCloudOrDev'],
+            ['isCloudOrDev', 'preflight'],
             sidePanelStateLogic,
             ['modalMode'],
+            featureFlagLogic,
+            ['featureFlags', 'receivedFeatureFlags'],
+            postOnboardingModalLogic,
+            ['modalShown'],
         ],
         actions: [
             billingLogic,
@@ -110,6 +109,10 @@ export const onboardingLogic = kea<onboardingLogicType>([
             ['updateCurrentTeam', 'updateCurrentTeamSuccess', 'recordProductIntentOnboardingComplete'],
             sidePanelStateLogic,
             ['openSidePanel'],
+            globalSetupLogic,
+            ['openGlobalSetup'],
+            postOnboardingModalLogic,
+            ['openPostOnboardingModal'],
         ],
     })),
     actions({
@@ -128,8 +131,15 @@ export const onboardingLogic = kea<onboardingLogicType>([
         resetStepKey: true,
         setOnCompleteOnboardingRedirectUrl: (url: string | null) => ({ url }),
         skipOnboarding: true,
+        setAwaitingPostOnboardingModal: (awaiting: boolean) => ({ awaiting }),
     }),
     reducers(() => ({
+        isAwaitingPostOnboardingModal: [
+            false,
+            {
+                setAwaitingPostOnboardingModal: (_, { awaiting }) => awaiting,
+            },
+        ],
         productKey: [
             null as ProductKey | null,
             {
@@ -244,14 +254,6 @@ export const onboardingLogic = kea<onboardingLogicType>([
                 return !billingProduct?.subscribed || subscribedDuringOnboarding
             },
         ],
-        shouldShowReverseProxyStep: [
-            (s) => [s.productKey],
-            (productKey) => {
-                return (
-                    productKey && [ProductKey.FEATURE_FLAGS, ProductKey.EXPERIMENTS].includes(productKey as ProductKey)
-                )
-            },
-        ],
         shouldShowDataWarehouseStep: [
             (s) => [s.productKey],
             (productKey) => {
@@ -303,7 +305,7 @@ export const onboardingLogic = kea<onboardingLogicType>([
             }
         },
         setProductKey: ({ productKey }) => {
-            if (!productKey) {
+            if (!productKey || !isKeyOf(productKey, availableOnboardingProducts)) {
                 window.location.href = urls.default()
                 return
             }
@@ -327,6 +329,8 @@ export const onboardingLogic = kea<onboardingLogicType>([
                 eventUsageLogic.actions.reportOnboardingCompleted(productKey)
                 props.onCompleteOnboarding?.(productKey)
                 actions.recordProductIntentOnboardingComplete({ product_type: productKey as ProductKey })
+                // Signal that the next updateCurrentTeamSuccess should show the modal
+                actions.setAwaitingPostOnboardingModal(true)
                 teamLogic.actions.updateCurrentTeam({
                     has_completed_onboarding_for: {
                         ...values.currentTeam?.has_completed_onboarding_for,
@@ -336,7 +340,25 @@ export const onboardingLogic = kea<onboardingLogicType>([
             }
         },
         skipOnboarding: () => {
+            actions.openGlobalSetup()
             router.actions.push(values.onCompleteOnboardingRedirectUrl)
+        },
+        updateCurrentTeamSuccess: () => {
+            if (values.isAwaitingPostOnboardingModal && values.productKey) {
+                actions.setAwaitingPostOnboardingModal(false)
+                // Experiment branch: variant shows modal, control shows Quick Start
+                const isVariant =
+                    values.receivedFeatureFlags &&
+                    values.featureFlags[FEATURE_FLAGS.POST_ONBOARDING_MODAL_EXPERIMENT] === 'test'
+
+                if (isVariant && !values.modalShown) {
+                    actions.openPostOnboardingModal(values.productKey)
+                } else {
+                    actions.openGlobalSetup()
+                }
+            } else {
+                actions.openGlobalSetup()
+            }
         },
         setAllOnboardingSteps: () => {
             if (values.isStepKeyInvalid) {
@@ -387,6 +409,7 @@ export const onboardingLogic = kea<onboardingLogicType>([
             if (values.productKey && val.payload?.has_completed_onboarding_for?.[values.productKey]) {
                 const redirectUrl = values.onCompleteOnboardingRedirectUrl
                 actions.setOnCompleteOnboardingRedirectUrl(null)
+
                 return [redirectUrl]
             }
         },

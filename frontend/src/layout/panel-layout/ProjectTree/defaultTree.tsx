@@ -6,11 +6,14 @@ import {
     IconBook,
     IconBug,
     IconCircleDashed,
-    IconCode2,
-    IconCursor,
+    IconClock,
+    IconCode,
+    IconEndpoints,
     IconDashboard,
     IconDatabase,
     IconDecisionTree,
+    IconDocument,
+    IconDownload,
     IconExternal,
     IconFeatures,
     IconFlask,
@@ -22,8 +25,11 @@ import {
     IconHogQL,
     IconHome,
     IconLifecycle,
+    IconListCheck,
+    IconListTree,
     IconLive,
     IconLlmAnalytics,
+    IconLlmPromptManagement,
     IconMegaphone,
     IconMessage,
     IconNotebook,
@@ -31,13 +37,18 @@ import {
     IconPeople,
     IconPieChart,
     IconPiggyBank,
+    IconPlay,
+    IconPlaylist,
     IconPlug,
+    IconReceipt,
     IconRetention,
     IconRewindPlay,
     IconRocket,
+    IconScatter,
     IconSearch,
     IconServer,
     IconSpotlight,
+    IconStethoscope,
     IconStickiness,
     IconSupport,
     IconToggle,
@@ -99,7 +110,7 @@ const iconTypes: Record<FileSystemIconType, { icon: JSX.Element; iconColor?: Fil
         iconColor: ['var(--color-product-web-analytics-light)', 'var(--color-product-web-analytics-dark)'],
     },
     endpoints: {
-        icon: <IconCode2 />,
+        icon: <IconEndpoints />,
         iconColor: ['var(--color-product-endpoints-light)', 'var(--color-product-endpoints-dark)'],
     },
     sql_editor: {
@@ -113,6 +124,9 @@ const iconTypes: Record<FileSystemIconType, { icon: JSX.Element; iconColor?: Fil
     heatmap: {
         icon: <IconApp />,
         iconColor: ['var(--color-product-heatmaps-light)', 'var(--color-product-heatmaps-dark)'],
+    },
+    session_profile: {
+        icon: <IconReceipt />,
     },
     session_replay: {
         icon: <IconRewindPlay />,
@@ -139,6 +153,14 @@ const iconTypes: Record<FileSystemIconType, { icon: JSX.Element; iconColor?: Fil
     logs: {
         icon: <IconLive />,
         iconColor: ['var(--color-product-logs-light)'],
+    },
+    tracing: {
+        icon: <IconListTree />,
+        iconColor: ['var(--color-product-tracing-light)'],
+    },
+    metrics: {
+        icon: <IconGraph />,
+        iconColor: ['var(--color-product-metrics-light)', 'var(--color-product-metrics-dark)'],
     },
     early_access_feature: {
         icon: <IconRocket />,
@@ -185,7 +207,10 @@ const iconTypes: Record<FileSystemIconType, { icon: JSX.Element; iconColor?: Fil
         icon: <IconBug />,
     },
     action: {
-        icon: <IconCursor />,
+        icon: <IconPlay />,
+    },
+    activity: {
+        icon: <IconClock />,
     },
     comment: {
         icon: <IconNotification />,
@@ -277,6 +302,44 @@ const iconTypes: Record<FileSystemIconType, { icon: JSX.Element; iconColor?: Fil
     settings: {
         icon: <IconGear />,
     },
+    health: {
+        icon: <IconStethoscope />,
+    },
+    inbox: {
+        icon: <IconNotification />,
+    },
+    sdk_doctor: {
+        icon: <IconCode />,
+    },
+    pipeline_status: {
+        icon: <IconDatabase />,
+    },
+    llm_evaluations: {
+        icon: <IconListCheck />,
+        iconColor: ['var(--color-product-llm-evaluations-light)'],
+    },
+    llm_datasets: {
+        icon: <IconDocument />,
+        iconColor: ['var(--color-product-llm-datasets-light)'],
+    },
+    llm_prompts: {
+        icon: <IconLlmPromptManagement />,
+        iconColor: ['var(--color-product-llm-prompts-light)'],
+    },
+    llm_clusters: {
+        icon: <IconScatter />,
+        iconColor: ['var(--color-product-llm-clusters-light)'],
+    },
+    llm_playground: {
+        icon: <IconPlaylist />,
+        iconColor: ['var(--color-product-llm-analytics-light)'],
+    },
+    visual_review: {
+        icon: <IconApp />,
+    },
+    exports: {
+        icon: <IconDownload />,
+    },
 }
 
 const getIconColor = (type?: string, colorOverride?: FileSystemIconColor): FileSystemIconColor => {
@@ -348,6 +411,23 @@ export function iconForType(type?: FileSystemIconType, colorOverride?: FileSyste
         )
     }
 
+    // Handle group type indices (group_0, group_1, etc.)
+    if (type.startsWith('group_')) {
+        const index = parseInt(type.split('_')[1], 10)
+        if (!isNaN(index)) {
+            return (
+                <ProductIconWrapper type="group" colorOverride={colorOverride}>
+                    <span className="relative flex items-center">
+                        <IconPeople />
+                        <div className="absolute -bottom-0.5 -right-1 z-10 flex h-[1.5em] w-[1.5em] items-center justify-center rounded-full bg-surface-tertiary text-[0.45em] font-[700] leading-none">
+                            {index}
+                        </div>
+                    </span>
+                </ProductIconWrapper>
+            )
+        }
+    }
+
     // Handle hog_function types
     if (type.startsWith('hog_function/')) {
         return (
@@ -373,6 +453,11 @@ export const getDefaultTreeProducts = (): FileSystemImport[] =>
     [...getTreeItemsProducts()].sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: 'accent' }))
 export const getDefaultTreeGames = (): FileSystemImport[] =>
     [...getTreeItemsGames()].sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: 'accent' }))
+
+export const getDefaultTreeDataAndPeople = (): FileSystemImport[] =>
+    [...getDefaultTreeData(), ...getDefaultTreePersons()].sort((a, b) =>
+        a.path.localeCompare(b.path, undefined, { sensitivity: 'accent' })
+    )
 
 export const getDefaultTreePersons = (): FileSystemImport[] => [
     {

@@ -6,7 +6,7 @@ import { router } from 'kea-router'
 import { useState } from 'react'
 
 import { IconPencil, IconTrash } from '@posthog/icons'
-import { LemonButton, LemonDialog, LemonTag } from '@posthog/lemon-ui'
+import { LemonDialog, LemonTag } from '@posthog/lemon-ui'
 
 import { FallbackCoverImage } from 'lib/components/FallbackCoverImage/FallbackCoverImage'
 import { More } from 'lib/lemon-ui/LemonButton/More'
@@ -22,10 +22,14 @@ import type { HogFlowTemplate } from '../hogflows/types'
 import { newWorkflowLogic } from '../newWorkflowLogic'
 import { workflowTemplatesLogic } from './workflowTemplatesLogic'
 
+interface WorkflowTemplateChooserProps {
+    showEmptyWorkflow?: boolean
+}
+
 // Adapted from DashboardTemplateChooser.tsx; try to keep parity for a consistent user experience
-export function WorkflowTemplateChooser(): JSX.Element {
-    const { filteredTemplates, workflowTemplatesLoading, tagFilter, availableTags } = useValues(workflowTemplatesLogic)
-    const { deleteHogflowTemplate, setTagFilter } = useActions(workflowTemplatesLogic)
+export function WorkflowTemplateChooser(props: WorkflowTemplateChooserProps): JSX.Element {
+    const { filteredTemplates, workflowTemplatesLoading } = useValues(workflowTemplatesLogic)
+    const { deleteHogflowTemplate } = useActions(workflowTemplatesLogic)
     const { user } = useValues(userLogic)
 
     const { createWorkflowFromTemplate, createEmptyWorkflow } = useActions(newWorkflowLogic)
@@ -44,27 +48,8 @@ export function WorkflowTemplateChooser(): JSX.Element {
     }
 
     return (
-        <div>
-            <div className="mb-4 flex flex-wrap gap-2">
-                <LemonButton
-                    type={tagFilter === null ? 'primary' : 'secondary'}
-                    onClick={() => setTagFilter(null)}
-                    size="small"
-                >
-                    All
-                </LemonButton>
-                {availableTags.map((tag) => (
-                    <LemonButton
-                        key={tag}
-                        type={tagFilter === tag ? 'primary' : 'secondary'}
-                        onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
-                        size="small"
-                    >
-                        {tag}
-                    </LemonButton>
-                ))}
-            </div>
-            <div className="WorkflowTemplateChooser">
+        <div className="WorkflowTemplateChooser">
+            {props.showEmptyWorkflow && (
                 <TemplateItem
                     key={0}
                     template={{
@@ -78,60 +63,62 @@ export function WorkflowTemplateChooser(): JSX.Element {
                     index={0}
                     data-attr="create-workflow-blank"
                 />
-                {workflowTemplatesLoading ? (
-                    <Spinner className="text-6xl" />
-                ) : (
-                    filteredTemplates.map((template: HogFlowTemplate, index: number) => (
-                        <TemplateItem
-                            key={template.id}
-                            template={template}
-                            onClick={() => createWorkflowFromTemplate(template)}
-                            onEdit={
-                                canEditTemplate(template)
-                                    ? (e) => {
-                                          e.stopPropagation()
-                                          router.actions.push(urls.workflowNew(), { editTemplateId: template.id })
-                                      }
-                                    : undefined
-                            }
-                            onDelete={
-                                canDeleteTemplate(template)
-                                    ? (e) => {
-                                          e.stopPropagation()
-                                          LemonDialog.open({
-                                              title: 'Delete template?',
-                                              description: (
-                                                  <>
-                                                      Are you sure you want to delete "{template.name}"?
-                                                      <br />
-                                                      This action cannot be undone!
-                                                  </>
-                                              ),
-                                              primaryButton: {
-                                                  children: 'Delete',
-                                                  status: 'danger',
-                                                  onClick: async () => {
-                                                      try {
-                                                          await deleteHogflowTemplate(template)
-                                                          lemonToast.success(`Template "${template.name}" deleted`)
-                                                      } catch (error: any) {
-                                                          lemonToast.error(
-                                                              `Failed to delete template: ${error.detail || error.message || 'Unknown error'}`
-                                                          )
-                                                      }
-                                                  },
+            )}
+            {workflowTemplatesLoading ? (
+                <Spinner className="text-6xl" />
+            ) : (
+                filteredTemplates.map((template: HogFlowTemplate, index: number) => (
+                    <TemplateItem
+                        key={template.id}
+                        template={template}
+                        onClick={() => createWorkflowFromTemplate(template)}
+                        onEdit={
+                            canEditTemplate(template)
+                                ? (e) => {
+                                      e.stopPropagation()
+                                      router.actions.push(urls.workflowNew(), {
+                                          editTemplateId: template.id,
+                                      })
+                                  }
+                                : undefined
+                        }
+                        onDelete={
+                            canDeleteTemplate(template)
+                                ? (e) => {
+                                      e.stopPropagation()
+                                      LemonDialog.open({
+                                          title: 'Delete template?',
+                                          description: (
+                                              <>
+                                                  Are you sure you want to delete "{template.name}"?
+                                                  <br />
+                                                  This action cannot be undone!
+                                              </>
+                                          ),
+                                          primaryButton: {
+                                              children: 'Delete',
+                                              status: 'danger',
+                                              onClick: async () => {
+                                                  try {
+                                                      await deleteHogflowTemplate(template)
+                                                      lemonToast.success(`Template "${template.name}" deleted`)
+                                                  } catch (error: any) {
+                                                      lemonToast.error(
+                                                          `Failed to delete template: ${error.detail || error.message || 'Unknown error'}`
+                                                      )
+                                                  }
                                               },
-                                              secondaryButton: { children: 'Cancel' },
-                                          })
-                                      }
-                                    : undefined
-                            }
-                            index={index + 1}
-                            data-attr="create-workflow-from-template"
-                        />
-                    ))
-                )}
-            </div>
+                                          },
+                                          secondaryButton: { children: 'Cancel' },
+                                      })
+                                  }
+                                : undefined
+                        }
+                        index={props.showEmptyWorkflow ? index + 1 : index}
+                        data-attr="create-workflow-from-template"
+                    />
+                ))
+            )}
         </div>
     )
 }
@@ -154,11 +141,18 @@ function TemplateItem({
     const [isHovering, setIsHovering] = useState(false)
     const [isMenuOpen, setIsMenuOpen] = useState(false)
 
-    const scopeTag = template.scope === 'global' ? 'official' : template.scope === 'team' ? 'team' : null
+    const scopeTag =
+        template.scope === 'global'
+            ? 'official'
+            : template.scope === 'organization'
+              ? 'organization'
+              : template.scope === 'team'
+                ? 'team'
+                : null
 
     return (
         <div
-            className="cursor-pointer border rounded TemplateItem flex flex-col transition-all relative"
+            className="cursor-pointer border rounded TemplateItem flex flex-col transition-all relative overflow-hidden"
             onClick={onClick}
             onMouseEnter={() => setIsHovering(true)}
             onMouseLeave={() => setIsHovering(false)}
@@ -220,14 +214,14 @@ function TemplateItem({
             </div>
 
             <h5 className="px-2 mb-1">{template?.name || 'Unnamed template'}</h5>
-            <div className="flex gap-x-1 px-2 mb-1 flex-wrap">
+            <div className="flex gap-x-1 gap-y-0.5 px-2 mb-1 flex-wrap">
                 {scopeTag && (
-                    <LemonTag key="scope" type="option">
+                    <LemonTag key="scope" type="option" className="shrink-0">
                         {scopeTag}
                     </LemonTag>
                 )}
                 {template.tags.map((tag) => (
-                    <LemonTag key={tag} type="default">
+                    <LemonTag key={tag} type="default" className="shrink-0">
                         {tag}
                     </LemonTag>
                 ))}

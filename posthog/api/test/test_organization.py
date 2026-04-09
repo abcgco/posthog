@@ -15,8 +15,9 @@ from posthog.api.oauth.test_dcr import generate_rsa_key
 from posthog.api.organization import OrganizationSerializer
 from posthog.models import FeatureFlag, Organization, OrganizationMembership, Team
 from posthog.models.oauth import OAuthAccessToken, OAuthApplication
-from posthog.models.personal_api_key import PersonalAPIKey, hash_key_value
-from posthog.models.utils import generate_random_token_personal
+from posthog.models.personal_api_key import PersonalAPIKey
+from posthog.models.uploaded_media import UploadedMedia
+from posthog.models.utils import generate_random_token_personal, hash_key_value
 from posthog.user_permissions import UserPermissions
 
 from ee.models.explicit_team_membership import ExplicitTeamMembership
@@ -84,52 +85,33 @@ class TestOrganizationAPI(APIBaseTest):
         self.organization_membership.level = OrganizationMembership.Level.ADMIN
         self.organization_membership.save()
         self.organization.name = self.CONFIG_ORGANIZATION_NAME
-        self.organization.is_member_join_email_enabled = True
         self.organization.save()
 
         response_rename = self.client.patch(f"/api/organizations/{self.organization.id}", {"name": "QWERTY"})
-        response_email = self.client.patch(
-            f"/api/organizations/{self.organization.id}",
-            {"is_member_join_email_enabled": False},
-        )
 
         self.assertEqual(response_rename.status_code, status.HTTP_200_OK)
-        self.assertEqual(response_email.status_code, status.HTTP_200_OK)
 
         self.organization.refresh_from_db()
         self.assertEqual(self.organization.name, "QWERTY")
-        self.assertEqual(self.organization.is_member_join_email_enabled, False)
 
     def test_update_organization_if_owner(self):
         self.organization_membership.level = OrganizationMembership.Level.OWNER
         self.organization_membership.save()
         self.organization.name = self.CONFIG_ORGANIZATION_NAME
-        self.organization.is_member_join_email_enabled = True
         self.organization.save()
 
         response_rename = self.client.patch(f"/api/organizations/{self.organization.id}", {"name": "QWERTY"})
-        response_email = self.client.patch(
-            f"/api/organizations/{self.organization.id}",
-            {"is_member_join_email_enabled": False},
-        )
 
         self.assertEqual(response_rename.status_code, status.HTTP_200_OK)
-        self.assertEqual(response_email.status_code, status.HTTP_200_OK)
 
         self.organization.refresh_from_db()
         self.assertEqual(self.organization.name, "QWERTY")
-        self.assertEqual(self.organization.is_member_join_email_enabled, False)
 
     def test_cannot_update_organization_if_not_owner_or_admin(self):
         self.organization_membership.level = OrganizationMembership.Level.MEMBER
         self.organization_membership.save()
         response_rename = self.client.patch(f"/api/organizations/{self.organization.id}", {"name": "ASDFG"})
-        response_email = self.client.patch(
-            f"/api/organizations/{self.organization.id}",
-            {"is_member_join_email_enabled": False},
-        )
         self.assertEqual(response_rename.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(response_email.status_code, status.HTTP_403_FORBIDDEN)
         self.organization.refresh_from_db()
         self.assertNotEqual(self.organization.name, "ASDFG")
 
@@ -324,6 +306,7 @@ class TestOrganizationAPI(APIBaseTest):
             last_used_at="2021-08-25T21:09:14",
             secure_value=hash_key_value(personal_api_key),
             scoped_organizations=[other_org.id],
+            scopes=["*"],
         )
 
         response = self.client.get("/api/organizations/", headers={"authorization": f"Bearer {personal_api_key}"})
@@ -494,6 +477,49 @@ class TestOrganizationPutPatchPermissions(APIBaseTest):
         self.assertEqual(response_patch.status_code, status.HTTP_200_OK)
         self.organization.refresh_from_db()
         self.assertEqual(self.organization.name, "Admin Updated Name PATCH")
+
+    def test_cannot_set_logo_media_from_another_organization(self):
+        other_org = Organization.objects.create(name="Other Org")
+        other_team = Team.objects.create(organization=other_org, name="Other Team")
+        other_media = UploadedMedia.objects.create(
+            team=other_team,
+            created_by=self.user,
+            media_location="http://example.com/other.png",
+            content_type="image/png",
+            file_name="other.png",
+        )
+
+        self.organization_membership.level = OrganizationMembership.Level.ADMIN
+        self.organization_membership.save()
+
+        response = self.client.patch(
+            f"/api/organizations/{self.organization.id}/",
+            {"logo_media_id": str(other_media.id)},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.json()["attr"], "logo_media_id")
+
+    def test_can_set_logo_media_from_own_organization(self):
+        media = UploadedMedia.objects.create(
+            team=self.team,
+            created_by=self.user,
+            media_location="http://example.com/own.png",
+            content_type="image/png",
+            file_name="own.png",
+        )
+
+        self.organization_membership.level = OrganizationMembership.Level.ADMIN
+        self.organization_membership.save()
+
+        response = self.client.patch(
+            f"/api/organizations/{self.organization.id}/",
+            {"logo_media_id": str(media.id)},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.organization.refresh_from_db()
+        self.assertEqual(self.organization.logo_media_id, media.id)
 
     def test_idor_protection_patch(self):
         """Test that users cannot modify organizations they don't belong to using PATCH."""
