@@ -78,6 +78,8 @@
     </remote_servers>
 
     <named_collections>
+        <ai_events>
+        </ai_events>
         <msk_cluster>
             <kafka_broker_list from_env="KAFKA_HOSTS"/>
         </msk_cluster>
