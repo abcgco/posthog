@@ -243,7 +243,6 @@ services:
     worker: &worker
         command: ./bin/docker-worker-celery --with-scheduler
         restart: on-failure
-        env_file: dev-services.env
         environment: &worker_env
             OTEL_SDK_DISABLED: 'true'
             API_QUERIES_PER_TEAM: '{"1": 100}'
