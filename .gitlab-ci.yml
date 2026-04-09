@@ -28,9 +28,11 @@ deploy_posthog:
         git clone --filter=blob:none $REPO_URL posthog
       fi
 
-    # Copy compose files to parent directory
+    # Copy compose files and configs to parent directory
     - cp posthog/docker-compose.base.yml docker-compose.base.yml
     - cp posthog/docker-compose.hobby.yml docker-compose.yml
+    - cp -r posthog/docker/ docker/
+    - cp -r posthog/compose/ compose/
 
     # Create network if not exists
     - docker network create web 2>/dev/null || true
@@ -74,6 +76,9 @@ deploy_posthog:
     # Deploy
     - docker compose -f docker-compose.yml pull
     - docker compose -f docker-compose.yml up -d --no-build
+
+    # Ensure Kafka topics exist
+    - docker compose -f docker-compose.yml run --rm kafka-init || true
 
     - echo "Done! PostHog is starting at https://$POSTHOG_DOMAIN"
   only:
