@@ -440,7 +440,7 @@ services:
             - ES_VERSION=v7
         image: temporalio/auto-setup:1.20.0
         ports:
-            - 7233:7233
+            - 127.0.0.1:7233:7233
         labels:
             kompose.volume.type: configMap
         volumes:
@@ -466,7 +466,7 @@ services:
             - TEMPORAL_CODEC_ENDPOINT=http://localhost:8000
         image: temporalio/ui:2.31.2
         ports:
-            - 8081:8080
+            - 127.0.0.1:8081:8080
     temporal-django-worker:
         <<: *worker
         command: ./bin/temporal-django-worker

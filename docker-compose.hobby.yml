@@ -402,8 +402,8 @@ services:
         volumes:
             - objectstorage:/data
         ports:
-            - '19000:19000'
-            - '19001:19001'
+            - '127.0.0.1:19000:19000'
+            - '127.0.0.1:19001:19001'
 
     seaweedfs:
         extends:
@@ -442,8 +442,6 @@ services:
             service: temporal
         environment:
             - ENABLE_ES=false
-        ports:
-            - 7233:7233
         volumes:
             - ./docker/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig
     elasticsearch:
@@ -460,8 +458,6 @@ services:
         extends:
             file: docker-compose.base.yml
             service: temporal-ui
-        ports:
-            - 8081:8080
         depends_on:
             temporal:
                 condition: service_started
