@@ -2,26 +2,27 @@ import { useActions, useValues } from 'kea'
 import { getNextSurveyStep } from 'posthog-js/dist/surveys-preview'
 import { ReactNode } from 'react'
 
-import { IconDownload, IconPlus } from '@posthog/icons'
-import { LemonButton, LemonMenu, LemonSelect, LemonSkeleton, LemonSwitch, Link } from '@posthog/lemon-ui'
+import { IconDownload } from '@posthog/icons'
+import { LemonButton, LemonMenu, LemonSelect, Link } from '@posthog/lemon-ui'
 
 import { exportsLogic } from 'lib/components/ExportButton/exportsLogic'
 import { TZLabel } from 'lib/components/TZLabel'
-import { pluralize } from 'lib/utils'
-import { HogFunctionIcon } from 'scenes/hog-functions/configuration/HogFunctionIcon'
+import { dayjs } from 'lib/dayjs'
+import { getAccessControlDisabledReason } from 'lib/utils/accessControlUtils'
+import { pluralize } from 'lib/utils/strings'
 import { SURVEY_TYPE_LABEL_MAP } from 'scenes/surveys/constants'
 import { SurveyAppearancePreview } from 'scenes/surveys/SurveyAppearancePreview'
 import { surveyLogic } from 'scenes/surveys/surveyLogic'
 import {
+    getRecurringSurveyScheduleInfo,
     getSurveyCollectionLimitSummary,
     getSurveyDisplayConditionsSummary,
-    newSurveyNotificationUrl,
 } from 'scenes/surveys/utils'
-import { urls } from 'scenes/urls'
 
 import {
+    AccessControlLevel,
+    AccessControlResourceType,
     ExporterFormat,
-    HogFunctionType,
     Survey,
     SurveyQuestionBranchingType,
     SurveySchedule as SurveyScheduleEnum,
@@ -81,6 +82,7 @@ export function SurveyDetailsPanel(): JSX.Element {
     const statusLabel = !survey.start_date ? 'Draft' : survey.end_date ? 'Complete' : 'Running'
     const conditionsSummary = hasTargetingSet ? getSurveyDisplayConditionsSummary(survey as Survey) : []
     const collectionLimitSummary = getSurveyCollectionLimitSummary(survey)
+    const scheduleInfo = getRecurringSurveyScheduleInfo(survey)
 
     return (
         <div className="flex flex-col gap-6">
@@ -142,6 +144,18 @@ export function SurveyDetailsPanel(): JSX.Element {
                         <span className="text-muted">Schedule</span>
                         <span>{formatSurveySchedule(survey as Survey)}</span>
                     </div>
+                    {scheduleInfo && (
+                        <div className="flex justify-between">
+                            <span className="text-muted">Auto-closes</span>
+                            <span>
+                                {scheduleInfo.autoCloseDate
+                                    ? scheduleInfo.autoCloseDate.isBefore(dayjs())
+                                        ? 'Soon'
+                                        : scheduleInfo.autoCloseDate.format('MMMM D, YYYY')
+                                    : `After ${pluralize(scheduleInfo.totalDurationDays, 'day')}`}
+                            </span>
+                        </div>
+                    )}
                     <div className="flex justify-between">
                         <span className="text-muted">Audience</span>
                         <span>{hasTargetingSet ? 'Targeted' : 'All users'}</span>
@@ -193,89 +207,15 @@ export function SurveyDetailsPanel(): JSX.Element {
     )
 }
 
-function getNotificationDescription(fn: HogFunctionType): string | null {
-    const inputs = fn.inputs
-    if (!inputs) {
-        return null
-    }
-    if (inputs.url?.value) {
-        try {
-            return new URL(String(inputs.url.value)).hostname
-        } catch {
-            return String(inputs.url.value)
-        }
-    }
-    if (inputs.channel?.value) {
-        return String(inputs.channel.value)
-    }
-    if (inputs.email?.value) {
-        return String(inputs.email.value)
-    }
-    return null
-}
-
-export function SurveyNotificationsPanel(): JSX.Element {
-    const { survey, surveyNotifications, surveyNotificationsLoading } = useValues(surveyLogic)
-    const { toggleSurveyNotificationEnabled } = useActions(surveyLogic)
-
-    if (surveyNotificationsLoading) {
-        return (
-            <div className="flex flex-col gap-2">
-                <LemonSkeleton className="h-12" />
-                <LemonSkeleton className="h-12" />
-            </div>
-        )
-    }
-
-    return (
-        <div className="flex flex-col gap-3">
-            {surveyNotifications.length > 0 ? (
-                <div className="flex flex-col gap-1.5">
-                    {surveyNotifications.map((fn) => {
-                        const description = getNotificationDescription(fn)
-                        return (
-                            <div key={fn.id} className="flex items-center gap-2 rounded border p-2">
-                                <HogFunctionIcon src={fn.icon_url} size="small" />
-                                <div className="flex-1 min-w-0">
-                                    <LemonButton
-                                        type="tertiary"
-                                        size="xsmall"
-                                        to={urls.hogFunction(fn.id)}
-                                        className="font-medium p-0 h-auto min-h-0"
-                                        noPadding
-                                    >
-                                        <span className="truncate">{fn.name}</span>
-                                    </LemonButton>
-                                    {description && <div className="text-xs text-muted truncate">{description}</div>}
-                                </div>
-                                <LemonSwitch
-                                    checked={fn.enabled}
-                                    onChange={() => toggleSurveyNotificationEnabled(fn.id, !fn.enabled)}
-                                    size="small"
-                                />
-                            </div>
-                        )
-                    })}
-                </div>
-            ) : (
-                <p className="text-xs text-muted m-0">No notifications configured yet.</p>
-            )}
-            <LemonButton
-                type="secondary"
-                size="small"
-                icon={<IconPlus />}
-                to={newSurveyNotificationUrl(survey.id)}
-                fullWidth
-            >
-                New notification
-            </LemonButton>
-        </div>
-    )
-}
-
 export function SurveyExportPanel(): JSX.Element {
     const { survey, dataTableQuery } = useValues(surveyLogic)
     const { startExport } = useActions(exportsLogic)
+
+    // Creating an export requires editor access to the export resource.
+    const exportAccessControlDisabledReason = getAccessControlDisabledReason(
+        AccessControlResourceType.Export,
+        AccessControlLevel.Editor
+    )
 
     const handleExport = (format: ExporterFormat): void => {
         if (!dataTableQuery) {
@@ -298,10 +238,12 @@ export function SurveyExportPanel(): JSX.Element {
                         {
                             label: 'Export as CSV',
                             onClick: () => handleExport(ExporterFormat.CSV),
+                            disabledReason: exportAccessControlDisabledReason ?? undefined,
                         },
                         {
                             label: 'Export as Excel',
                             onClick: () => handleExport(ExporterFormat.XLSX),
+                            disabledReason: exportAccessControlDisabledReason ?? undefined,
                         },
                     ]}
                 >

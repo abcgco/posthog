@@ -6,18 +6,24 @@ from parameterized import parameterized
 
 from products.marketing_analytics.backend.services.types import (
     Campaign,
+    SuggestedAction,
     TeamMappings,
     UtmAuditResponse,
+    UtmIssueKind,
     UtmIssueSeverity,
 )
 from products.marketing_analytics.backend.services.utm_audit import (
     _build_all_utm_events,
+    _build_known_sources,
     _cross_reference,
     _load_team_mappings,
     run_utm_audit,
 )
 
 NO_MAPPINGS = TeamMappings(source_to_integration={}, campaign_aliases={}, field_preferences={})
+# known_sources set populated from every integration's default utm_source values.
+# Built lazily inside tests via _build_known_sources() so we don't hardcode every value.
+DEFAULT_KNOWN_SOURCES: set[str] = _build_known_sources(NO_MAPPINGS)
 
 
 class TestCrossReference:
@@ -25,7 +31,7 @@ class TestCrossReference:
         campaigns = [Campaign("Spring Sale", "123", "google", 100.0, 50, 1000)]
         utm_events = {("spring sale", "google"): 42}
 
-        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS)
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
 
         assert len(results) == 1
         assert results[0].has_utm_events is True
@@ -35,7 +41,7 @@ class TestCrossReference:
     def test_campaign_with_no_utm_events(self):
         campaigns = [Campaign("Summer Promo", "456", "google", 500.0, 100, 5000)]
 
-        results = _cross_reference(campaigns, {}, NO_MAPPINGS)
+        results = _cross_reference(campaigns, {}, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
 
         assert len(results) == 1
         assert results[0].has_utm_events is False
@@ -46,9 +52,9 @@ class TestCrossReference:
 
     def test_campaign_with_source_mismatch(self):
         campaigns = [Campaign("Brand Campaign", "789", "google", 200.0, 80, 2000)]
-        utm_events = {("brand campaign", "adwords"): 30}
+        utm_events = {("brand campaign", "newsletter"): 30}
 
-        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS)
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
 
         assert len(results) == 1
         assert results[0].has_utm_events is False
@@ -56,11 +62,53 @@ class TestCrossReference:
         assert results[0].issues[0].field == "utm_source"
         assert results[0].issues[0].severity == UtmIssueSeverity.WARNING
 
+    @pytest.mark.parametrize(
+        "campaign_source,utm_source",
+        [
+            ("meta", "facebook"),
+            ("meta", "fb"),
+            ("meta", "instagram"),
+            ("google", "adwords"),
+            ("google", "google_maps"),
+        ],
+    )
+    def test_default_alias_counts_as_exact_match(self, campaign_source, utm_source):
+        campaigns = [Campaign("Spring Sale", "123", campaign_source, 100.0, 50, 1000)]
+        utm_events = {("spring sale", utm_source): 42}
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
+
+        assert len(results) == 1
+        assert results[0].has_utm_events is True
+        assert results[0].event_count == 42
+        assert len(results[0].issues) == 0
+
+    def test_custom_mapping_wins_over_default_alias(self):
+        # Team remapped 'facebook' to google, so it must not count for the meta campaign.
+        campaigns = [
+            Campaign("Spring Sale", "1", "meta", 100.0, 50, 1000),
+            Campaign("Spring Sale", "2", "google", 100.0, 50, 1000),
+        ]
+        utm_events = {("spring sale", "facebook"): 42}
+        mappings = TeamMappings(
+            source_to_integration={"facebook": "google"},
+            campaign_aliases={},
+            field_preferences={},
+        )
+
+        results = _cross_reference(campaigns, utm_events, mappings, _build_known_sources(mappings))
+
+        google = next(r for r in results if r.source_name == "google")
+        meta = next(r for r in results if r.source_name == "meta")
+        assert google.has_utm_events is True
+        assert google.event_count == 42
+        assert meta.has_utm_events is False
+
     def test_case_insensitive_matching(self):
         campaigns = [Campaign("WINTER Sale", "101", "Google", 150.0, 60, 1500)]
         utm_events = {("winter sale", "google"): 25}
 
-        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS)
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
 
         assert len(results) == 1
         assert results[0].has_utm_events is True
@@ -75,7 +123,7 @@ class TestCrossReference:
         ]
         utm_events = {("good campaign", "google"): 100}
 
-        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS)
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
 
         assert len(results) == 3
 
@@ -93,7 +141,7 @@ class TestCrossReference:
         assert worse.issues[0].severity == UtmIssueSeverity.ERROR
 
     def test_empty_campaigns(self):
-        results = _cross_reference([], {}, NO_MAPPINGS)
+        results = _cross_reference([], {}, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
         assert len(results) == 0
 
     def test_custom_source_mapping_resolves_match(self):
@@ -105,7 +153,7 @@ class TestCrossReference:
             field_preferences={},
         )
 
-        results = _cross_reference(campaigns, utm_events, mappings)
+        results = _cross_reference(campaigns, utm_events, mappings, _build_known_sources(mappings))
 
         assert len(results) == 1
         assert results[0].has_utm_events is True
@@ -121,7 +169,7 @@ class TestCrossReference:
             field_preferences={},
         )
 
-        results = _cross_reference(campaigns, utm_events, mappings)
+        results = _cross_reference(campaigns, utm_events, mappings, _build_known_sources(mappings))
 
         assert len(results) == 1
         assert results[0].has_utm_events is True
@@ -137,12 +185,222 @@ class TestCrossReference:
             field_preferences={},
         )
 
-        results = _cross_reference(campaigns, utm_events, mappings)
+        results = _cross_reference(campaigns, utm_events, mappings, _build_known_sources(mappings))
 
         assert len(results) == 1
         assert results[0].has_utm_events is True
         assert results[0].event_count == 55
         assert len(results[0].issues) == 0
+
+
+class TestCrossReferenceIssueKinds:
+    """Covers the 5 audit scenarios: OK / NOT_LINKED / NAME_COLLISION / NO_TAGGED_EVENTS / UNKNOWN_SOURCE."""
+
+    def test_ok_emits_no_issue(self):
+        campaigns = [Campaign("Spring Sale", "1", "google", 100.0, 50, 1000)]
+        utm_events = {("spring sale", "google"): 42}
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
+
+        assert len(results[0].issues) == 0
+
+    def test_not_linked_when_no_events_match_and_no_shared_name(self):
+        campaigns = [Campaign("Summer Promo", "456", "google", 500.0, 100, 5000)]
+
+        results = _cross_reference(campaigns, {}, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
+
+        assert len(results[0].issues) == 1
+        issue = results[0].issues[0]
+        assert issue.kind == UtmIssueKind.NOT_LINKED
+        assert issue.severity == UtmIssueSeverity.ERROR
+        assert issue.alternative_sources == []
+        assert issue.shared_with_integrations == []
+        assert issue.suggested_actions == [SuggestedAction.FIX_PLATFORM_URLS]
+
+    def test_no_tagged_events_when_alt_source_is_another_default(self):
+        # Bing campaign but events only arrive with utm_source=google (Google's default).
+        # Mapping google→bing would break Google attribution, so ADD_SOURCE_MAPPING must not be suggested.
+        campaigns = [Campaign("Shared Campaign", "1", "bing", 100.0, 50, 1000)]
+        utm_events = {("shared campaign", "google"): 29}
+        known_sources = _build_known_sources(NO_MAPPINGS)
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, known_sources)
+
+        issue = results[0].issues[0]
+        assert issue.kind == UtmIssueKind.NO_TAGGED_EVENTS
+        assert issue.severity == UtmIssueSeverity.WARNING
+        assert issue.suggested_actions == [SuggestedAction.FIX_PLATFORM_URLS]
+        assert SuggestedAction.ADD_SOURCE_MAPPING not in issue.suggested_actions
+        assert len(issue.alternative_sources) == 1
+        assert issue.alternative_sources[0].utm_source == "google"
+        assert issue.alternative_sources[0].event_count == 29
+
+    def test_unknown_source_when_alt_source_is_not_claimed_by_any_integration(self):
+        # utm_source='partner_xyz' is not a default of any integration. Safe to offer ADD_SOURCE_MAPPING.
+        campaigns = [Campaign("Brand Campaign", "1", "bing", 100.0, 50, 1000)]
+        utm_events = {("brand campaign", "partner_xyz"): 40}
+        known_sources = _build_known_sources(NO_MAPPINGS)
+        assert "partner_xyz" not in known_sources
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, known_sources)
+
+        issue = results[0].issues[0]
+        assert issue.kind == UtmIssueKind.UNKNOWN_SOURCE
+        assert issue.severity == UtmIssueSeverity.WARNING
+        # Platform fix should always be listed first as the primary recommendation.
+        assert issue.suggested_actions == [SuggestedAction.FIX_PLATFORM_URLS, SuggestedAction.ADD_SOURCE_MAPPING]
+        assert len(issue.alternative_sources) == 1
+        assert issue.alternative_sources[0].utm_source == "partner_xyz"
+
+    def test_missing_source_when_events_have_no_utm_source(self):
+        # Pageviews match the campaign name but carry no utm_source (e.g. auto-tagged Performance Max).
+        # Must not be classified as UNKNOWN_SOURCE, and must not suggest mapping an empty source.
+        campaigns = [Campaign("Performance Max - Generic", "1", "google", 500.0, 100, 5000)]
+        utm_events = {("performance max - generic", ""): 222}
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
+
+        issue = results[0].issues[0]
+        assert issue.kind == UtmIssueKind.MISSING_SOURCE
+        assert issue.severity == UtmIssueSeverity.WARNING
+        assert issue.alternative_sources == []
+        assert issue.missing_source_count == 222
+        assert issue.suggested_actions == [SuggestedAction.FIX_PLATFORM_URLS]
+
+    def test_partly_tagged_campaign_keeps_both_the_wrong_source_and_the_untagged_count(self):
+        # The shape that motivated MISSING_SOURCE, but only half the pageviews are untagged. The wrong
+        # source is the actionable classification, so it wins the kind — the untagged ones must still
+        # be reported rather than dropped, since fixing the URLs has to cover both.
+        campaigns = [Campaign("Performance Max - Generic", "1", "google", 500.0, 100, 5000)]
+        utm_events = {
+            ("performance max - generic", ""): 222,
+            ("performance max - generic", "partner_xyz"): 30,
+        }
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
+
+        issue = results[0].issues[0]
+        assert issue.kind == UtmIssueKind.UNKNOWN_SOURCE
+        assert [alt.utm_source for alt in issue.alternative_sources] == ["partner_xyz"]
+        assert issue.missing_source_count == 222
+
+    def test_untagged_count_is_zero_when_every_pageview_carries_a_source(self):
+        # Guards the other direction: the count must not leak in from unrelated events.
+        campaigns = [Campaign("Brand", "1", "google", 500.0, 100, 5000)]
+        utm_events = {("brand", "facebook"): 40}
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, DEFAULT_KNOWN_SOURCES)
+
+        assert results[0].issues[0].missing_source_count == 0
+
+    def test_name_collision_when_another_platform_matches_same_name(self):
+        # Both Bing and Google have "Survey". Events only tag google.
+        # Google's row passes; Bing's row should be NAME_COLLISION with SWITCH_TO_ID_MATCH as primary fix.
+        campaigns = [
+            Campaign("Survey", "1", "bing", 100.0, 50, 1000),
+            Campaign("Survey", "2", "google", 200.0, 100, 2000),
+        ]
+        utm_events = {("survey", "google"): 29}
+        known_sources = _build_known_sources(NO_MAPPINGS)
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, known_sources)
+        google = next(r for r in results if r.source_name == "google")
+        bing = next(r for r in results if r.source_name == "bing")
+
+        assert google.has_utm_events is True
+        assert len(google.issues) == 0
+
+        assert bing.has_utm_events is False
+        assert len(bing.issues) == 1
+        issue = bing.issues[0]
+        assert issue.kind == UtmIssueKind.NAME_COLLISION
+        assert issue.severity == UtmIssueSeverity.WARNING
+        assert SuggestedAction.ADD_SOURCE_MAPPING not in issue.suggested_actions
+        assert issue.suggested_actions[0] == SuggestedAction.SWITCH_TO_ID_MATCH
+        assert issue.shared_with_integrations == ["google"]
+
+    def test_name_collision_takes_precedence_over_unknown_source(self):
+        # Even if alt_source is unknown, a shared name with another matching platform
+        # should be classified as NAME_COLLISION (events likely belong to the other platform).
+        campaigns = [
+            Campaign("Survey", "1", "bing", 100.0, 50, 1000),
+            Campaign("Survey", "2", "google", 200.0, 100, 2000),
+        ]
+        utm_events = {
+            ("survey", "google"): 29,  # Matches google's row
+            ("survey", "weird_source"): 5,  # Unknown alt for bing
+        }
+        known_sources = _build_known_sources(NO_MAPPINGS)
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, known_sources)
+        bing = next(r for r in results if r.source_name == "bing")
+
+        assert bing.issues[0].kind == UtmIssueKind.NAME_COLLISION
+        assert "google" in bing.issues[0].shared_with_integrations
+
+    def test_alternative_sources_sorted_by_event_count_desc(self):
+        campaigns = [Campaign("Brand", "1", "bing", 100.0, 50, 1000)]
+        utm_events = {
+            ("brand", "partner_xyz"): 5,
+            ("brand", "unknown_partner"): 30,
+            ("brand", "yet_another"): 15,
+        }
+        known_sources = _build_known_sources(NO_MAPPINGS)
+
+        results = _cross_reference(campaigns, utm_events, NO_MAPPINGS, known_sources)
+        issue = results[0].issues[0]
+
+        counts = [alt.event_count for alt in issue.alternative_sources]
+        assert counts == sorted(counts, reverse=True)
+
+    def test_custom_mapping_makes_source_known_blocking_suggestion(self):
+        # If team already mapped 'weird_source' to google, and bing's events arrive as 'weird_source',
+        # we should NOT suggest a new mapping (would conflict with the existing one).
+        campaigns = [Campaign("Brand", "1", "bing", 100.0, 50, 1000)]
+        utm_events = {("brand", "weird_source"): 10}
+        mappings = TeamMappings(
+            source_to_integration={"weird_source": "google"},
+            campaign_aliases={},
+            field_preferences={},
+        )
+        known_sources = _build_known_sources(mappings)
+        assert "weird_source" in known_sources
+
+        results = _cross_reference(campaigns, utm_events, mappings, known_sources)
+        issue = results[0].issues[0]
+
+        assert issue.kind == UtmIssueKind.NO_TAGGED_EVENTS
+        assert SuggestedAction.ADD_SOURCE_MAPPING not in issue.suggested_actions
+
+
+class TestBuildKnownSources:
+    @pytest.mark.parametrize(
+        "source,expected_present",
+        [
+            # Sanity-check a few well-known defaults from each integration
+            ("google", True),
+            ("bing", True),
+            ("linkedin", True),
+            ("partner_xyz", False),
+            ("completely_made_up", False),
+        ],
+    )
+    def test_membership_for_default_known_sources(self, source, expected_present):
+        result = _build_known_sources(NO_MAPPINGS)
+
+        assert (source in result) is expected_present
+
+    def test_includes_custom_team_mappings(self):
+        mappings = TeamMappings(
+            source_to_integration={"partner_blog": "google", "internal_source": "meta"},
+            campaign_aliases={},
+            field_preferences={},
+        )
+
+        result = _build_known_sources(mappings)
+
+        assert "partner_blog" in result
+        assert "internal_source" in result
 
 
 class TestCrossReferenceFieldPreferences:
@@ -164,7 +422,7 @@ class TestCrossReferenceFieldPreferences:
             field_preferences={"google": match_field},
         )
 
-        results = _cross_reference(campaigns, utm_events, mappings)
+        results = _cross_reference(campaigns, utm_events, mappings, _build_known_sources(mappings))
 
         assert len(results) == 1
         if should_match:
@@ -190,7 +448,7 @@ class TestCrossReferenceFieldPreferences:
             field_preferences={"google": "campaign_id", "meta": "campaign_name"},
         )
 
-        results = _cross_reference(campaigns, utm_events, mappings)
+        results = _cross_reference(campaigns, utm_events, mappings, _build_known_sources(mappings))
 
         assert len(results) == 2
         google = next(r for r in results if r.source_name == "google")
@@ -211,7 +469,7 @@ class TestCrossReferenceFieldPreferences:
             field_preferences={"google": "campaign_id"},
         )
 
-        results = _cross_reference(campaigns, utm_events, mappings)
+        results = _cross_reference(campaigns, utm_events, mappings, _build_known_sources(mappings))
 
         assert len(results) == 1
         assert results[0].has_utm_events is True
@@ -243,7 +501,7 @@ class TestBuildAllUtmEvents:
 
     def test_campaign_auto_source_none(self):
         campaigns = [Campaign("brand", "1", "google", 0, 0, 0)]
-        utm_events = {("brand", "adwords"): 30}
+        utm_events = {("brand", "newsletter"): 30}
 
         result = _build_all_utm_events(campaigns, utm_events, NO_MAPPINGS)
 
@@ -251,6 +509,16 @@ class TestBuildAllUtmEvents:
         assert result[0].campaign_match == "auto"
         assert result[0].source_match == "none"
         assert result[0].matched_campaign == "brand"
+
+    def test_default_alias_source_auto(self):
+        campaigns = [Campaign("brand", "1", "meta", 0, 0, 0)]
+        utm_events = {("brand", "facebook"): 30}
+
+        result = _build_all_utm_events(campaigns, utm_events, NO_MAPPINGS)
+
+        assert len(result) == 1
+        assert result[0].campaign_match == "auto"
+        assert result[0].source_match == "auto"
 
     def test_source_auto_campaign_none(self):
         campaigns = [Campaign("brand", "1", "google", 0, 0, 0)]
@@ -611,3 +879,26 @@ class TestRunUtmAudit(BaseTest):
 
         assert result.total_spend_at_risk == 0.0
         assert result.campaigns_with_issues == 0
+
+    @patch("products.marketing_analytics.backend.services.utm_audit._get_utm_events")
+    @patch("products.marketing_analytics.backend.services.utm_audit._get_campaigns_with_spend")
+    def test_e2e_name_collision_scenario_produces_correct_kind_and_actions(self, mock_campaigns, mock_utm):
+        # End-to-end smoke test: same campaign name on Bing and Google, events only tagged as google.
+        # Verifies the full run_utm_audit pipeline (known_sources building, _cross_reference,
+        # _build_issue) produces the expected kind and suggested_actions.
+        mock_campaigns.return_value = [
+            self._make_campaign("Survey", "1", "bing", spend=100.0),
+            self._make_campaign("Survey", "2", "google", spend=200.0),
+        ]
+        mock_utm.return_value = {("survey", "google"): 29}
+
+        result = run_utm_audit(self.team)
+
+        bing = next(r for r in result.results if r.source_name == "bing")
+        google = next(r for r in result.results if r.source_name == "google")
+
+        assert len(google.issues) == 0
+        assert len(bing.issues) == 1
+        assert bing.issues[0].kind == UtmIssueKind.NAME_COLLISION
+        assert bing.issues[0].suggested_actions[0] == SuggestedAction.SWITCH_TO_ID_MATCH
+        assert "google" in bing.issues[0].shared_with_integrations

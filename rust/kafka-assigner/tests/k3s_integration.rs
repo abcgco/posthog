@@ -41,7 +41,7 @@ use common::{
 
 const NAMESPACE: &str = "default";
 const NUM_PARTITIONS: u32 = 8;
-const E2E_TIMEOUT: Duration = Duration::from_secs(60);
+const E2E_TIMEOUT: Duration = Duration::from_secs(180);
 
 // ── K3s helpers ──────────────────────────────────────────
 
@@ -56,6 +56,13 @@ async fn setup_k3s() -> (
     let container = K3s::default()
         .with_conf_mount(tmp_dir.path())
         .with_privileged(true)
+        .with_cmd([
+            "server",
+            "--snapshotter=native",
+            "--disable=traefik",
+            "--disable=servicelb",
+            "--disable=metrics-server",
+        ])
         .start()
         .await
         .expect("failed to start k3s container");
@@ -323,6 +330,35 @@ async fn trigger_statefulset_rollout(client: &Client, name: &str) {
         .expect("failed to patch statefulset");
 }
 
+/// Wait for the k3s API server to become reachable again after a rollout.
+/// The API server can crash under resource pressure in the single-node
+/// testcontainer; this avoids burning the `wait_for_condition` budget on
+/// Connect errors.
+async fn wait_for_k3s_api_ready(client: &Client, timeout_dur: Duration) {
+    const REQUIRED_CONSECUTIVE: u32 = 3;
+    let start = std::time::Instant::now();
+    let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(client.clone(), NAMESPACE);
+    let mut consecutive_ok: u32 = 0;
+    loop {
+        if tokio::time::timeout(Duration::from_secs(5), pods.list(&ListParams::default()))
+            .await
+            .map(|r| r.is_ok())
+            .unwrap_or(false)
+        {
+            consecutive_ok += 1;
+            if consecutive_ok >= REQUIRED_CONSECUTIVE {
+                return;
+            }
+        } else {
+            consecutive_ok = 0;
+        }
+        if start.elapsed() > timeout_dur {
+            panic!("k3s API server did not stabilize within {timeout_dur:?}");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 async fn scale_deployment(client: &Client, name: &str, replicas: i32) {
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), NAMESPACE);
     let patch = serde_json::json!({
@@ -514,13 +550,35 @@ async fn deployment_rollout_reassigns_partitions() {
         .expect("register old-1 failed")
         .into_inner();
 
-    // Wait for initial assignment across both consumers
+    // Wait for initial assignment to settle across both consumers.
+    //
+    // The two Register RPCs write to etcd sequentially, and each runs a k3s
+    // controller-discovery lookup first. If the second write lands outside the
+    // assigner's rebalance debounce window (e.g. when the k3s API server is
+    // slow under CI load), the assigner first assigns all partitions to
+    // consumer A, then rebalances half to B via handoffs rather than in one
+    // direct assignment. Drive any such in-flight handoffs here, exactly as a
+    // real consumer would, so we converge on steady state regardless of which
+    // path the assigner took, instead of hanging on a transient handoff.
     let check_store = Arc::clone(&store);
     let check_names = old_names.clone();
     wait_for_condition(E2E_TIMEOUT, POLL_INTERVAL, || {
         let store = Arc::clone(&check_store);
         let names = check_names.clone();
         async move {
+            let handoffs = store.list_handoffs().await.unwrap_or_default();
+            for h in &handoffs {
+                match h.phase {
+                    kafka_assigner::types::HandoffPhase::Warming => {
+                        signal_ready(&store, &h.topic_partition()).await;
+                    }
+                    kafka_assigner::types::HandoffPhase::Complete => {
+                        signal_released(&store, &h.topic_partition()).await;
+                    }
+                    kafka_assigner::types::HandoffPhase::Ready => {}
+                }
+            }
+
             let a = store.list_assignments().await.unwrap_or_default();
             let h = store.list_handoffs().await.unwrap_or_default();
             a.len() == NUM_PARTITIONS as usize
@@ -540,6 +598,10 @@ async fn deployment_rollout_reassigns_partitions() {
         DepartureReason::Rollout,
     )
     .await;
+
+    // Wait for the k3s API server to recover — it can crash under resource
+    // pressure during the rollout in the single-node testcontainer.
+    wait_for_k3s_api_ready(&k8s_client, E2E_TIMEOUT).await;
 
     // Wait for new k3s pods (created by the rollout)
     let new_names =

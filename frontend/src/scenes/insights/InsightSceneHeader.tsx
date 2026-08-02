@@ -2,8 +2,8 @@ import { useValues } from 'kea'
 
 import { LemonBanner, LemonButton } from '@posthog/lemon-ui'
 
-import { DebugCHQueries } from 'lib/components/AppShortcuts/utils/DebugCHQueries'
-import { useFeatureFlag } from 'lib/hooks/useFeatureFlag'
+import { DebugCHQueries } from 'lib/components/Shortcuts/utils/DebugCHQueries'
+import { insightLogic } from 'scenes/insights/insightLogic'
 import { insightSceneLogic } from 'scenes/insights/insightSceneLogic'
 import { ReloadInsight } from 'scenes/saved-insights/ReloadInsight'
 import { urls } from 'scenes/urls'
@@ -21,7 +21,7 @@ export interface InsightSceneHeaderProps {
 export function InsightSceneHeader({ insightLogicProps }: InsightSceneHeaderProps): JSX.Element {
     const { insightMode, hasOverrides, freshQuery } = useValues(insightSceneLogic)
     const { showDebugPanel } = useValues(insightDataLogic(insightLogicProps))
-    const editorPanelsEnabled = useFeatureFlag('PRODUCT_ANALYTICS_SIMPLE_EDITOR', 'test')
+    const { insight } = useValues(insightLogic(insightLogicProps))
     const insightId = insightLogicProps.dashboardItemId
 
     return (
@@ -32,8 +32,8 @@ export function InsightSceneHeader({ insightLogicProps }: InsightSceneHeaderProp
                 <LemonBanner type="warning" className="mb-4">
                     <div className="flex flex-row items-center justify-between gap-2">
                         <span>
-                            You are viewing this insight with filter/variable overrides. Discard them to edit the
-                            insight.
+                            You're viewing this insight with a dashboard's filters applied, so it can't be edited.
+                            Discard the filters to edit the saved insight.
                         </span>
 
                         <LemonButton type="secondary" to={urls.insightView(insightId as InsightShortId)}>
@@ -43,18 +43,15 @@ export function InsightSceneHeader({ insightLogicProps }: InsightSceneHeaderProp
                 </LemonBanner>
             )}
 
-            {insightMode === ItemMode.Edit &&
-                (editorPanelsEnabled ? (
-                    <div className="[&_.LemonTabs]:![--lemon-tabs-margin-bottom:0]">
-                        <InsightsNav />
-                    </div>
-                ) : (
+            {insightMode === ItemMode.Edit && (
+                <div className="[&_.LemonTabs]:![--lemon-tabs-margin-bottom:0]">
                     <InsightsNav />
-                ))}
+                </div>
+            )}
 
-            {showDebugPanel && (
+            {showDebugPanel && insight?.id && (
                 <div className="mb-4">
-                    <DebugCHQueries insightId={insightLogicProps.cachedInsight?.id} />
+                    <DebugCHQueries insightId={insight.id} />
                 </div>
             )}
 

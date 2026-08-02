@@ -2,21 +2,32 @@ import { useActions, useValues } from 'kea'
 import posthog from 'posthog-js'
 import { useEffect, useMemo } from 'react'
 
+import { IconCopy, IconTrash } from '@posthog/icons'
 import { LemonButton } from '@posthog/lemon-ui'
 
 import { NotFound } from 'lib/components/NotFound'
 import { SceneDuplicate } from 'lib/components/Scenes/SceneDuplicate'
 import { SceneFile } from 'lib/components/Scenes/SceneFile'
+import { SceneMenuBarFileItems } from 'lib/components/Scenes/SceneMenuBarFileItems'
 import { SceneMetalyticsSummaryButton } from 'lib/components/Scenes/SceneMetalyticsSummaryButton'
 import { ScenePin } from 'lib/components/Scenes/ScenePin'
 import { SceneActivityIndicator } from 'lib/components/Scenes/SceneUpdateActivityInfo'
+import { FEATURE_FLAGS } from 'lib/constants'
 import { useFileSystemLogView } from 'lib/hooks/useFileSystemLogView'
 import { LemonSkeleton } from 'lib/lemon-ui/LemonSkeleton'
+import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { ButtonPrimitive } from 'lib/ui/Button/ButtonPrimitives'
 import { SceneExport } from 'scenes/sceneTypes'
 import { playerSettingsLogic } from 'scenes/session-recordings/player/playerSettingsLogic'
 
 import { SceneContent } from '~/layout/scenes/components/SceneContent'
+import {
+    SceneMenuBar,
+    SceneMenuBarCheckboxItem,
+    SceneMenuBarItem,
+    SceneMenuBarMenu,
+    SceneMenuBarSeparator,
+} from '~/layout/scenes/components/SceneMenuBar'
 import { SceneTitleSection } from '~/layout/scenes/components/SceneTitleSection'
 import {
     ScenePanel,
@@ -25,9 +36,8 @@ import {
     ScenePanelInfoSection,
 } from '~/layout/scenes/SceneLayout'
 
-import { isUniversalFilters } from '../utils'
 import { SessionRecordingsPlaylist } from './SessionRecordingsPlaylist'
-import { convertLegacyFiltersToUniversalFilters } from './sessionRecordingsPlaylistLogic'
+import { asUniversalFilters } from './sessionRecordingsPlaylistLogic'
 import {
     SessionRecordingsPlaylistLogicProps,
     sessionRecordingsPlaylistSceneLogic,
@@ -73,6 +83,8 @@ export function SessionRecordingsPlaylistScene(): JSX.Element {
 
     const { showFilters } = useValues(playerSettingsLogic)
     const { setShowFilters } = useActions(playerSettingsLogic)
+    const { featureFlags } = useValues(featureFlagLogic)
+    const sceneMenuBarEnabled = !!featureFlags[FEATURE_FLAGS.SCENE_MENU_BAR]
 
     const isNewPlaylist = useMemo(() => {
         if (!playlist || playlistLoading) {
@@ -110,6 +122,45 @@ export function SessionRecordingsPlaylistScene(): JSX.Element {
 
     return (
         <div>
+            {sceneMenuBarEnabled && (
+                <SceneMenuBar>
+                    <SceneMenuBarMenu label="File" dataAttr={`${RESOURCE_TYPE}-menubar-file`}>
+                        <SceneMenuBarFileItems dataAttrKey={RESOURCE_TYPE} />
+                        {!playlist.is_synthetic && (
+                            <>
+                                <SceneMenuBarSeparator />
+                                <SceneMenuBarItem
+                                    variant="destructive"
+                                    onClick={() => deletePlaylist()}
+                                    data-attr={`${RESOURCE_TYPE}-menubar-delete`}
+                                >
+                                    <IconTrash />
+                                    Delete collection
+                                </SceneMenuBarItem>
+                            </>
+                        )}
+                    </SceneMenuBarMenu>
+                    {!playlist.is_synthetic && (
+                        <SceneMenuBarMenu label="Edit" dataAttr={`${RESOURCE_TYPE}-menubar-edit`}>
+                            <SceneMenuBarItem
+                                onClick={() => duplicatePlaylist()}
+                                data-attr={`${RESOURCE_TYPE}-menubar-duplicate`}
+                            >
+                                <IconCopy />
+                                Duplicate
+                            </SceneMenuBarItem>
+                            <SceneMenuBarSeparator />
+                            <SceneMenuBarCheckboxItem
+                                checked={playlist.pinned ?? false}
+                                onCheckedChange={(checked) => updatePlaylist({ pinned: checked })}
+                                data-attr={`${RESOURCE_TYPE}-menubar-pin`}
+                            >
+                                Pinned
+                            </SceneMenuBarCheckboxItem>
+                        </SceneMenuBarMenu>
+                    )}
+                </SceneMenuBar>
+            )}
             <ScenePanel>
                 <ScenePanelInfoSection>
                     <SceneFile dataAttrKey={RESOURCE_TYPE} />
@@ -178,11 +229,7 @@ export function SessionRecordingsPlaylistScene(): JSX.Element {
                 <SessionRecordingsPlaylist
                     logicKey={playlist.short_id}
                     // backwards compatibility for legacy filters
-                    filters={
-                        playlist.filters && isUniversalFilters(playlist.filters)
-                            ? playlist.filters
-                            : convertLegacyFiltersToUniversalFilters({}, playlist.filters)
-                    }
+                    filters={asUniversalFilters(playlist.filters)}
                     onFiltersChange={setFilters}
                     onPinnedChange={onPinnedChange}
                     pinnedRecordings={pinnedRecordings ?? []}

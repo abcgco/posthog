@@ -1,7 +1,7 @@
 /**
  * @jest-environment jsdom
  */
-import { CorsPlugin, HLSPlayerPlugin, WindowTitlePlugin } from './index'
+import { CorsPlugin, createHLSPlayerPlugin, WindowTitlePlugin } from './index'
 
 describe('CorsPlugin', () => {
     it.each(['https://some-external.js'])('should replace JS urls', (jsUrl) => {
@@ -58,20 +58,27 @@ const mockHlsClass = Object.assign(
 jest.mock('hls.js', () => ({ __esModule: true, default: mockHlsClass }))
 
 describe('HLSPlayerPlugin', () => {
+    let plugin: ReturnType<typeof createHLSPlayerPlugin>
+
+    // `onBuild` fires `import('hls.js').then(...)` without awaiting it; drain the microtask
+    // queue so the handler has run before asserting.
+    const delay = (ms = 0): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
     beforeEach(() => {
         jest.clearAllMocks()
         mockHlsClass.isSupported.mockReturnValue(true)
+        plugin = createHLSPlayerPlugin()
     })
 
     it('does nothing for non-video elements', async () => {
         const div = document.createElement('div')
-        await HLSPlayerPlugin.onBuild?.(div, { id: 1, replayer: null as any })
+        await plugin.onBuild?.(div, { id: 1, replayer: null as any })
         expect(mockHlsClass).not.toHaveBeenCalled()
     })
 
     it('does nothing for video elements without hls-src', async () => {
         const video = document.createElement('video')
-        await HLSPlayerPlugin.onBuild?.(video, { id: 1, replayer: null as any })
+        await plugin.onBuild?.(video, { id: 1, replayer: null as any })
         expect(mockHlsClass).not.toHaveBeenCalled()
     })
 
@@ -79,7 +86,8 @@ describe('HLSPlayerPlugin', () => {
         const video = document.createElement('video')
         video.setAttribute('hls-src', 'https://example.com/stream.m3u8')
 
-        await HLSPlayerPlugin.onBuild?.(video, { id: 1, replayer: null as any })
+        await plugin.onBuild?.(video, { id: 1, replayer: null as any })
+        await delay()
 
         expect(mockHlsClass).toHaveBeenCalled()
         expect(mockHlsInstance.loadSource).toHaveBeenCalledWith('https://example.com/stream.m3u8')
@@ -93,7 +101,8 @@ describe('HLSPlayerPlugin', () => {
         video.setAttribute('hls-src', 'https://example.com/stream.m3u8')
         video.canPlayType = jest.fn(() => 'maybe') as any
 
-        await HLSPlayerPlugin.onBuild?.(video, { id: 1, replayer: null as any })
+        await plugin.onBuild?.(video, { id: 1, replayer: null as any })
+        await delay()
 
         expect(mockHlsInstance.loadSource).not.toHaveBeenCalled()
         expect(video.src).toContain('https://example.com/stream.m3u8')

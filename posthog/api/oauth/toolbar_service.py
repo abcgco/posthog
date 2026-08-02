@@ -8,8 +8,6 @@ Non-obvious behavior documented here:
 """
 
 import re
-import base64
-import hashlib
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -129,8 +127,10 @@ def normalize_and_validate_app_url(team: Team, app_url: str) -> str:
     # re-initialization loop, and leftover __posthog_toolbar params cause
     # duplicate params on re-authentication.
     if parsed.fragment and "__posthog" in parsed.fragment:
-        clean_fragment = re.sub(r"&?__posthog_toolbar=[^&]*", "", parsed.fragment)
-        clean_fragment = re.sub(r"&?__posthog=[^&]*", "", clean_fragment).strip("&")
+        # `?` separator covers SPA hash routes (#/login?__posthog_toolbar=...);
+        # `&` covers traditional fragment params (#section1&__posthog_toolbar=...).
+        clean_fragment = re.sub(r"[?&]?__posthog_toolbar=[^&]*", "", parsed.fragment)
+        clean_fragment = re.sub(r"[?&]?__posthog=[^&]*", "", clean_fragment).strip("?&")
         return urlunparse(parsed._replace(fragment=clean_fragment))
 
     return app_url
@@ -373,14 +373,6 @@ def refresh_tokens(
         },
         error_code="token_refresh_failed",
     )
-
-
-def generate_pkce_pair() -> tuple[str, str]:
-    """Generate a PKCE code_verifier and its S256 code_challenge."""
-    code_verifier = secrets.token_urlsafe(48)
-    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return code_verifier, code_challenge
 
 
 def new_state_nonce() -> str:

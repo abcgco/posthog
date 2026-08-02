@@ -23,7 +23,6 @@ from posthog.schema import (
     AssistantFunnelsQuery,
     AssistantGenerationStatusEvent,
     AssistantGenerationStatusType,
-    AssistantHogQLQuery,
     AssistantMessage,
     AssistantRetentionActionsNode,
     AssistantRetentionEventsNode,
@@ -34,8 +33,10 @@ from posthog.schema import (
     AssistantTrendsQuery,
     ContextMessage,
     DashboardFilter,
+    DataVisualizationNode,
     EventTaxonomyItem,
     FailureMessage,
+    HogQLQuery,
     HumanMessage,
     MaxAddonInfo,
     MaxBillingContext,
@@ -49,7 +50,8 @@ from posthog.schema import (
     VisualizationArtifactContent,
 )
 
-from posthog.models import Action
+from products.actions.backend.models.action import Action
+from products.posthog_ai.backend.models.assistant import Conversation, CoreMemory
 
 from ee.hogai.chat_agent.funnels.nodes import FunnelsSchemaGeneratorOutput
 from ee.hogai.chat_agent.graph import AssistantGraph
@@ -65,7 +67,6 @@ from ee.hogai.test.base import BaseAssistantTest
 from ee.hogai.utils.tests import FakeAnthropicRunnableLambdaWithTokenCounter, FakeChatAnthropic, FakeChatOpenAI
 from ee.hogai.utils.types import AssistantNodeName, AssistantOutput, AssistantState, PartialAssistantState
 from ee.hogai.utils.types.base import ArtifactRefMessage, ReplaceMessages
-from ee.models.assistant import Conversation, CoreMemory
 
 title_generator_mock = patch(
     "ee.hogai.core.title_generator.nodes.TitleGeneratorNode._model",
@@ -570,7 +571,7 @@ class TestChatAgent(ClickhouseTestMixin, BaseAssistantTest):
 
         query = AssistantRetentionQuery(
             retentionFilter=AssistantRetentionFilter(
-                targetEntity=AssistantRetentionEventsNode(name="$pageview"),
+                targetEntity=AssistantRetentionEventsNode(id="$pageview"),
                 returningEntity=AssistantRetentionActionsNode(name=action.name, id=action.id),
             )
         )
@@ -645,7 +646,7 @@ class TestChatAgent(ClickhouseTestMixin, BaseAssistantTest):
         )
         root_mock.side_effect = cycle([res1, res2])
 
-        query = AssistantHogQLQuery(query="SELECT 1")
+        query = DataVisualizationNode(source=HogQLQuery(query="SELECT 1"))
 
         # First run
         actual_output, _ = await self._run_assistant_graph(is_new_conversation=True, agent_mode=AgentMode.SQL)
@@ -1705,7 +1706,7 @@ class TestChatAgent(ClickhouseTestMixin, BaseAssistantTest):
                 ),
             ]
         )
-        mock_tool.return_value = ("Event list" * 128000, None)
+        mock_tool.return_value = ("Event list" * 200000, None)
         mock_should_compact.side_effect = cycle([False, True])  # Also changed this
 
         graph = (
@@ -1725,7 +1726,7 @@ class TestChatAgent(ClickhouseTestMixin, BaseAssistantTest):
                     tool_calls=[{"id": "1", "name": "read_taxonomy", "args": {"query": {"kind": "events"}}}],
                 ),
             ),
-            ("message", AssistantToolCallMessage(tool_call_id="1", content="Event list" * 128000)),
+            ("message", AssistantToolCallMessage(tool_call_id="1", content="Event list" * 200000)),
             ("message", HumanMessage(content="First")),  # Should copy this message
             ("message", AssistantMessage(content="After summary")),
         ]

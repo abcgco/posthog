@@ -2,63 +2,25 @@ import './CodeSnippet.scss'
 
 import clsx from 'clsx'
 import { toHtml } from 'hast-util-to-html'
-import bash from 'highlight.js/lib/languages/bash'
-import csharp from 'highlight.js/lib/languages/csharp'
 import dart from 'highlight.js/lib/languages/dart'
 import elixir from 'highlight.js/lib/languages/elixir'
-import go from 'highlight.js/lib/languages/go'
 import groovy from 'highlight.js/lib/languages/groovy'
 import http from 'highlight.js/lib/languages/http'
-import java from 'highlight.js/lib/languages/java'
-import javascript from 'highlight.js/lib/languages/javascript'
-import json from 'highlight.js/lib/languages/json'
-import kotlin from 'highlight.js/lib/languages/kotlin'
-import objectivec from 'highlight.js/lib/languages/objectivec'
-import php from 'highlight.js/lib/languages/php'
-import python from 'highlight.js/lib/languages/python'
-import ruby from 'highlight.js/lib/languages/ruby'
-import sql from 'highlight.js/lib/languages/sql'
-import swift from 'highlight.js/lib/languages/swift'
-import typescript from 'highlight.js/lib/languages/typescript'
-import xml from 'highlight.js/lib/languages/xml'
-import yaml from 'highlight.js/lib/languages/yaml'
 import { useValues } from 'kea'
 import { common, createLowlight } from 'lowlight'
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 
 import { IconCollapse, IconCopy, IconExpand } from '@posthog/icons'
 
 import { LemonButton } from 'lib/lemon-ui/LemonButton'
+import { themeLogic } from 'lib/logic/themeLogic'
 import { copyToClipboard } from 'lib/utils/copyToClipboard'
-
-import { themeLogic } from '~/layout/navigation-3000/themeLogic'
 
 import terraform from './terraformLanguage'
 
+// `common` already registers most of our languages (including rust, c, and cpp) — only add the missing ones.
 const lowlight = createLowlight(common)
-lowlight.register({
-    bash,
-    csharp,
-    dart,
-    elixir,
-    go,
-    groovy,
-    http,
-    java,
-    javascript,
-    json,
-    kotlin,
-    xml,
-    objectivec,
-    php,
-    python,
-    ruby,
-    sql,
-    swift,
-    terraform,
-    typescript,
-    yaml,
-})
+lowlight.register({ dart, elixir, groovy, http, terraform })
 
 export enum Language {
     Text = 'text',
@@ -86,6 +48,9 @@ export enum Language {
     CSharp = 'csharp',
     TypeScript = 'typescript',
     HCL = 'terraform',
+    Rust = 'rust',
+    C = 'c',
+    CPlusPlus = 'cpp',
 }
 
 export const getLanguage = (lang: string): Language => {
@@ -138,6 +103,12 @@ export const getLanguage = (lang: string): Language => {
             return Language.Groovy
         case 'hcl':
             return Language.HCL
+        case 'rust':
+            return Language.Rust
+        case 'c':
+            return Language.C
+        case 'cpp':
+            return Language.CPlusPlus
         default:
             return Language.Text
     }
@@ -154,6 +125,11 @@ export interface CodeSnippetProps {
     thing?: string
     /** If set, the snippet becomes expandable when there's more than this number of lines. */
     maxLinesWithoutExpansion?: number
+    /**
+     * Called after the snippet contents reach the clipboard. Useful for telemetry. Not called when
+     * the copy fails, so it is safe to treat as a successful copy.
+     */
+    onCopy?: () => void
 }
 
 export const CodeSnippet = React.memo(function CodeSnippet({
@@ -165,25 +141,17 @@ export const CodeSnippet = React.memo(function CodeSnippet({
     actions,
     thing = 'snippet',
     maxLinesWithoutExpansion,
+    onCopy,
 }: CodeSnippetProps): JSX.Element | null {
     const [expanded, setExpanded] = useState(false)
-    const [indexOfLimitNewline, setIndexOfLimitNewline] = useState(() =>
-        maxLinesWithoutExpansion ? indexOfNth(text || '', '\n', maxLinesWithoutExpansion) : -1
-    )
-    const [lineCount, setLineCount] = useState(() => text?.split('\n').length || -1)
-    const [displayedText, setDisplayedText] = useState(
-        () => (indexOfLimitNewline === -1 || expanded ? text : text?.slice(0, indexOfLimitNewline)) ?? ''
-    )
 
-    useEffect(() => {
-        if (text) {
-            setIndexOfLimitNewline(maxLinesWithoutExpansion ? indexOfNth(text, '\n', maxLinesWithoutExpansion) : -1)
-            setLineCount(text.split('\n').length)
-            setDisplayedText(indexOfLimitNewline === -1 || expanded ? text : text.slice(0, indexOfLimitNewline))
-        }
-    }, [text, maxLinesWithoutExpansion, expanded]) // oxlint-disable-line react-hooks/exhaustive-deps
+    // These all derive from props, so compute them during render rather than mirroring props into
+    // state via a useEffect (https://react.dev/learn/you-might-not-need-an-effect).
+    const indexOfLimitNewline = maxLinesWithoutExpansion ? indexOfNth(text || '', '\n', maxLinesWithoutExpansion) : -1
+    const lineCount = text?.split('\n').length ?? -1
+    const displayedText = (indexOfLimitNewline === -1 || expanded ? text : text?.slice(0, indexOfLimitNewline)) ?? ''
 
-    if (lineCount == -1) {
+    if (lineCount === -1) {
         return null
     }
 
@@ -197,7 +165,15 @@ export const CodeSnippet = React.memo(function CodeSnippet({
                     onClick={(e) => {
                         if (text) {
                             e.stopPropagation()
-                            void copyToClipboard(text, thing)
+                            // Only report a copy the user actually got: copyToClipboard resolves
+                            // false when the clipboard is unavailable (no navigator.clipboard over
+                            // plain HTTP) or the write is denied, and callers treat onCopy as
+                            // evidence of a successful copy.
+                            void copyToClipboard(text, thing).then((copied) => {
+                                if (copied) {
+                                    onCopy?.()
+                                }
+                            })
                         }
                     }}
                     size={compact ? 'small' : 'medium'}

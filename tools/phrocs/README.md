@@ -5,6 +5,14 @@ Drop-in replacement for `mprocs` — reads the same YAML config that `hogli dev:
 
 ## Install
 
+If you develop PostHog with **flox**, you already have phrocs: activation builds
+it from source (`make -C tools/phrocs build`) and `bin/start` runs that build
+directly from `tools/phrocs/dist/phrocs`. The source build is canonical — it
+always matches your checkout, so there's nothing to install or keep up to date,
+and a stray Homebrew/curl install can't shadow it.
+
+For **non-flox** setups, install a prebuilt binary:
+
 **Homebrew** (macOS and Linux):
 
 ```sh
@@ -16,6 +24,9 @@ brew tap posthog/tap && brew install phrocs
 ```sh
 curl -fsSL https://raw.githubusercontent.com/PostHog/posthog/master/tools/phrocs/install.sh | bash
 ```
+
+`bin/start` resolves phrocs in this order: the in-repo `dist/phrocs` build if
+present, otherwise `phrocs` on `PATH`.
 
 ## Build
 
@@ -50,26 +61,36 @@ You typically run phrocs via `hogli start` rather than directly.
 
 ## Keybindings
 
-| Key    | Action                                          |
-| ------ | ----------------------------------------------- |
-| `tab`  | Swap focus sidebar/output                       |
-| `↓/j`  | Next process (sidebar) / scroll down (output)   |
-| `↑/k`  | Previous process (sidebar) / scroll up (output) |
-| `pgdn` | Scroll output down                              |
-| `pgup` | Scroll output up                                |
-| `home` | Jump to top of output                           |
-| `end`  | Jump to bottom of output                        |
-| `r`    | Restart selected process                        |
-| `s`    | Stop selected process                           |
-| `c`    | Enter copy mode                                 |
-| `i`    | Show process info in pager                      |
-| `o`    | Sort processes by <name/CPU/RAM/status>         |
-| `/`    | Enter search mode                               |
-| `esc`  | Exit copy and search modes                      |
-| `?`    | Toggle full help                                |
-| `q`    | Quit                                            |
+| Key    | Action                                                  |
+| ------ | ------------------------------------------------------- |
+| `tab`  | Swap focus sidebar/output                               |
+| `↓/j`  | Next process (sidebar) / scroll down (output)           |
+| `↑/k`  | Previous process (sidebar) / scroll up (output)         |
+| `pgdn` | Scroll output down                                      |
+| `pgup` | Scroll output up                                        |
+| `home` | Jump to top of output                                   |
+| `end`  | Jump to bottom of output                                |
+| `s`    | Start selected process                                  |
+| `x`    | Stop selected process                                   |
+| `r`    | Restart selected process                                |
+| `R`    | Restart all failed processes                            |
+| `l`    | Clear logs of selected process                          |
+| `c`    | Enter copy mode                                         |
+| `i`    | Show process info in pager                              |
+| `o`    | Sort processes by <name/CPU/RAM/status>                 |
+| `g`    | Cycle process grouping (from config `groups` field)     |
+| `a`    | Toggle show all registry processes                      |
+| `t`    | Enter setup mode (choose which services to run)         |
+| `/`    | Enter search mode (then `tab` to switch to filter mode) |
+| `esc`  | Exit copy, search, and filter modes                     |
+| `↵`    | Send keystrokes to the process (output pane)            |
+| `?`    | Toggle full help                                        |
+| `q`    | Quit (docker containers keep running; see below)        |
 
 Mouse clicks switch focus; mouse wheel scrolls the output pane.
+
+Quitting stops the processes phrocs supervises, but the docker compose containers keep running: `docker compose up` runs detached (`-d`), and the compose stack is deliberately shared across worktrees.
+To fully tear it down, run `hogli docker:services:down` (or `hogli docker:services:remove` to also wipe volumes).
 
 ### Copy mode
 
@@ -77,11 +98,27 @@ Press `c` to enter copy mode in the output pane.
 Navigate with `↑`/`↓`, press `c` again to mark the selection start, then extend with `↑`/`↓` and press `c` to copy to clipboard.
 Press `esc` to exit without copying.
 
-### Search mode
+### Sending input to a process
 
-Press `/` to enter search mode, type a query, then press `enter` to keep highlights active.
-Use `↵` and `⇧↵` to jump to the next/previous match.
-Press `esc` to clear the active search.
+Some processes wait for input on stdin, like a `(y/n)` confirmation, a REPL, an interactive CLI. Focus the output pane (`tab`), then type to send keystrokes to the process's PTY.
+
+phrocs auto-detects a prompt when the last output didn't end in a newline, and starts forwarding keystrokes right away. That heuristic misses prompts that print a trailing newline, so you can also press `↵` to enter **input mode** explicitly: every key then goes to the process until you press `esc` to leave.
+
+### Search and filter modes
+
+Press `/` to enter search mode, type a query, then use `↓`/`↑` to jump between matches.
+Press `tab` to switch to **filter mode**, which hides all non-matching lines and shows a count of matches in the footer.
+Press `tab` again in filter mode to return to search mode (the query is preserved).
+Press `esc` to exit and clear the query.
+
+Queries support multiple space-separated tokens — all must match for a line to be included:
+
+| Pattern       | Description                                         |
+| ------------- | --------------------------------------------------- |
+| `term`        | Case-insensitive substring match                    |
+| `!term`       | Negative match — exclude lines containing `term`    |
+| `re:pattern`  | Regex match (case-insensitive)                      |
+| `!re:pattern` | Negative regex — exclude lines matching the pattern |
 
 ### Info panel
 
@@ -101,6 +138,26 @@ Press `d` to open lazydocker with the relevant compose files.
 
 Press `p` to open a system process viewer filtered to the selected process's PID.
 Prefers `htop` (tree view + PID filter), falls back to `btop` (unfiltered), then `top` (PID filter).
+
+### Grouping
+
+Press `g` to cycle through grouping dimensions defined in the config.
+Each process can declare a `groups` map and an optional top-level `group_order` controls display order.
+The top-level `default_group` names the dimension the sidebar starts grouped by (omit it to start ungrouped).
+See `bin/mprocs.yaml` for the config format.
+
+Processes without a matching group appear under Ungrouped.
+The reserved value `pinned` places a process at the top without a header.
+
+### Show all processes
+
+Press `a` to toggle visibility of all processes from the full registry (`bin/mprocs.yaml`),
+not just those in your current intent config.
+
+Processes not in your intent config appear dimmed with a `·` status icon. They are config-only placeholders that consume no resources until started. Once started (`s`), it behaves like any other process (logs, restart, stop, info).
+
+This is useful for getting a big-picture overview of the full dev environment
+or temporarily starting a process without changing your intent config.
 
 ## Debug logging
 

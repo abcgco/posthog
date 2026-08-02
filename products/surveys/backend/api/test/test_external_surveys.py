@@ -1,14 +1,20 @@
+import re
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qsl
 
 from posthog.test.base import APIBaseTest
 from unittest.mock import patch
 
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
+
+from parameterized import parameterized
 
 from products.surveys.backend.models import Survey
+
+EXTERNAL_SITE_URL = "https://app.posthog-test.example"
 
 
 class TestExternalSurveys(APIBaseTest):
@@ -20,6 +26,12 @@ class TestExternalSurveys(APIBaseTest):
     def setUp(self):
         super().setUp()
         cache.clear()
+
+    def get_json_script_value(self, content: str, script_id: str) -> object:
+        script_match = re.search(rf'<script[^>]*id="{script_id}"[^>]*>(.*?)</script>', content, re.DOTALL)
+        assert script_match is not None
+
+        return json.loads(script_match.group(1))
 
     def create_external_survey(self, **kwargs):
         """Helper method to create external surveys for testing"""
@@ -95,7 +107,7 @@ class TestExternalSurveys(APIBaseTest):
 
         response = self.client.get(f"/external_surveys/{popover_survey.id}/")
         assert response.status_code == 404
-        assert "Survey not receiving responses" in response.content.decode()
+        assert "Feels quiet in here" in response.content.decode()
 
     def test_archived_surveys_not_accessible(self):
         """Test that archived surveys return 404"""
@@ -103,7 +115,19 @@ class TestExternalSurveys(APIBaseTest):
 
         response = self.client.get(f"/external_surveys/{survey.id}/")
         assert response.status_code == 404
-        assert "Survey not receiving responses" in response.content.decode()
+        assert "Feels quiet in here" in response.content.decode()
+
+    def test_error_page_includes_survey_appearance(self):
+        survey = self.create_external_survey(
+            archived=True,
+            appearance={"backgroundColor": "#1a1a2e", "textColor": "#e0e0e0"},
+        )
+
+        response = self.client.get(f"/external_surveys/{survey.id}/")
+        assert response.status_code == 404
+        content = response.content.decode()
+        assert "#1a1a2e" in content
+        assert "#e0e0e0" in content
 
     def test_survey_must_be_running(self):
         """Test survey availability based on start/end dates"""
@@ -111,6 +135,7 @@ class TestExternalSurveys(APIBaseTest):
         future_survey = self.create_external_survey(start_date=datetime.now(UTC) + timedelta(days=1))
         response = self.client.get(f"/external_surveys/{future_survey.id}/")
         assert response.status_code == 404
+        assert "Feels quiet in here" in response.content.decode()
 
         # Survey ended
         ended_survey = self.create_external_survey(
@@ -118,11 +143,13 @@ class TestExternalSurveys(APIBaseTest):
         )
         response = self.client.get(f"/external_surveys/{ended_survey.id}/")
         assert response.status_code == 404
+        assert "Feels quiet in here" in response.content.decode()
 
         # Survey never started
         never_started_survey = self.create_external_survey(start_date=None)
         response = self.client.get(f"/external_surveys/{never_started_survey.id}/")
         assert response.status_code == 404
+        assert "Feels quiet in here" in response.content.decode()
 
     def test_security_headers_present(self):
         """Test that proper security headers are set"""
@@ -158,6 +185,61 @@ class TestExternalSurveys(APIBaseTest):
         # Description should not be in the response
         assert "SENSITIVE" not in response.content.decode()
         assert "Internal team feedback" not in response.content.decode()
+
+    def test_safe_translations_are_exposed_without_survey_description(self):
+        survey = self.create_external_survey(
+            description="SENSITIVE: Internal default description",
+            translations={
+                "es": {
+                    "name": "Encuesta traducida",
+                    "description": "SENSITIVE: Internal translated description",
+                    "thankYouMessageHeader": "Gracias",
+                    "thankYouMessageDescription": "Agradecemos tus comentarios",
+                    "thankYouMessageCloseButtonText": "Cerrar",
+                },
+                "fr": {
+                    "description": "SENSITIVE: Description interne uniquement",
+                },
+            },
+            questions=[
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "open",
+                    "question": "What do you think of our product?",
+                    "description": "Question description",
+                    "translations": {
+                        "es": {
+                            "question": "¿Qué opinas de nuestro producto?",
+                            "description": "Descripción de la pregunta",
+                        }
+                    },
+                }
+            ],
+        )
+
+        response = self.client.get(f"/external_surveys/{survey.id}/")
+        assert response.status_code == 200
+
+        content = response.content.decode()
+        assert "SENSITIVE" not in content
+
+        survey_match = re.search(r'<script[^>]*id="survey-data"[^>]*>(.*?)</script>', content, re.DOTALL)
+        assert survey_match is not None
+
+        survey_data = json.loads(survey_match.group(1))
+        assert "description" not in survey_data
+        assert survey_data["translations"] == {
+            "es": {
+                "name": "Encuesta traducida",
+                "thankYouMessageHeader": "Gracias",
+                "thankYouMessageDescription": "Agradecemos tus comentarios",
+                "thankYouMessageCloseButtonText": "Cerrar",
+            }
+        }
+        assert survey_data["questions"][0]["translations"]["es"] == {
+            "question": "¿Qué opinas de nuestro producto?",
+            "description": "Descripción de la pregunta",
+        }
 
     # FUNCTIONALITY TESTS
 
@@ -214,6 +296,101 @@ class TestExternalSurveys(APIBaseTest):
         project_config = json.loads(config_match.group(1))
         assert "api_host" in project_config
         assert "token" in project_config
+
+    @override_settings(SITE_URL=EXTERNAL_SITE_URL)
+    def test_assets_load_from_app_origin_behind_reverse_proxy(self):
+        survey = self.create_external_survey()
+
+        # Simulate serving the page through a reverse-proxy domain
+        response = self.client.get(f"/external_surveys/{survey.id}/", HTTP_HOST="surveys.proxy-domain.example.com")
+        assert response.status_code == 200
+
+        content = response.content.decode()
+        # Proxy domains route /static/* to the SDK asset CDN, which doesn't serve Django
+        # staticfiles — asset URLs must point at the app origin, not the serving host.
+        assert f'<link rel="stylesheet" href="{EXTERNAL_SITE_URL}/static/surveys/hosted-survey.css' in content
+        assert 'href="/static/' not in content
+        # Capture must keep following the request host so events route through the proxy
+        project_config = self.get_json_script_value(content, "project-config")
+        assert isinstance(project_config, dict)
+        assert project_config["api_host"] == "http://surveys.proxy-domain.example.com"
+
+        # Error pages are served through proxies too and must not emit relative asset links
+        error_response = self.client.get("/external_surveys/not-a-uuid/", HTTP_HOST="surveys.proxy-domain.example.com")
+        assert error_response.status_code == 400
+        error_content = error_response.content.decode()
+        assert f'href="{EXTERNAL_SITE_URL}/static/icons/favicon-32x32.png' in error_content
+        assert 'href="/static/' not in error_content
+
+    @override_settings(SITE_URL="http://localhost:8010")
+    def test_localhost_site_url_falls_back_to_relative_asset_urls(self):
+        survey = self.create_external_survey()
+
+        # A localhost SITE_URL (the unset default) isn't reachable by external browsers —
+        # the page must degrade to host-relative asset paths instead of emitting it.
+        response = self.client.get(f"/external_surveys/{survey.id}/")
+        assert response.status_code == 200
+
+        content = response.content.decode()
+        assert '<link rel="stylesheet" href="/static/surveys/hosted-survey.css' in content
+        assert "http://localhost:8010" not in content
+
+    @parameterized.expand(
+        [
+            ("base_locale", "es", "es"),
+            ("locale_with_region", "en-US", "en-US"),
+            ("locale_with_script_and_region", "zh-Hant-TW", "zh-Hant-TW"),
+        ]
+    )
+    def test_valid_display_language_query_param_configures_sdk_override(
+        self, _name: str, locale: str, expected_display_language: str
+    ):
+        survey = self.create_external_survey()
+
+        response = self.client.get(f"/external_surveys/{survey.id}/?display_language={locale}&campaign=spring")
+        assert response.status_code == 200
+
+        content = response.content.decode()
+        assert f'<html lang="{expected_display_language}">' in content
+        assert self.get_json_script_value(content, "display-language") == expected_display_language
+        assert "config.override_display_language = displayLanguage" in content
+
+    @parameterized.expand(
+        [
+            ("javascript_url", "javascript:alert(1)"),
+            ("empty_value", ""),
+            ("overlong_value", "x" * 36),
+            ("numeric_base", "1234"),
+            ("underscore_separator", "pt_BR"),
+        ]
+    )
+    def test_invalid_display_language_query_param_is_ignored(self, _name: str, locale: str):
+        survey = self.create_external_survey()
+
+        response = self.client.get(f"/external_surveys/{survey.id}/?display_language={locale}")
+        assert response.status_code == 200
+
+        content = response.content.decode()
+        assert '<html lang="en">' in content
+        assert self.get_json_script_value(content, "display-language") is None
+
+    def test_display_language_query_param_is_not_added_to_survey_event_properties(self):
+        survey = self.create_external_survey()
+
+        response = self.client.get(f"/external_surveys/{survey.id}/?display_language=es&campaign=spring")
+        assert response.status_code == 200
+
+        content = response.content.decode()
+        ignored_params_match = re.search(r"const URL_PARAMS_TO_IGNORE = \[(.*?)\];", content)
+        assert ignored_params_match is not None
+        ignored_params = re.findall(r"'([^']+)'", ignored_params_match.group(1))
+
+        survey_event_properties = {}
+        for key, value in parse_qsl("display_language=es&campaign=spring"):
+            if key.lower() not in ignored_params and not re.match(r"^q\d+$", key.lower()):
+                survey_event_properties[key] = value
+
+        assert survey_event_properties == {"campaign": "spring"}
 
     # PERFORMANCE & CACHING TESTS
 

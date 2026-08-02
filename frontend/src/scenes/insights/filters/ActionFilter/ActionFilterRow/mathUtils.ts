@@ -1,6 +1,6 @@
 import { COUNT_PER_ACTOR_MATH_DEFINITIONS, PROPERTY_MATH_DEFINITIONS } from 'scenes/trends/mathsLogic'
 
-import { CountPerActorMathType, PropertyMathType } from '~/types'
+import { CountPerActorMathType, InsightType, PropertyMathType } from '~/types'
 
 // Property math types that can be meaningfully aggregated when rolling up histogram buckets
 // e.g. taking p99 of p99 values doesn't make sense
@@ -21,14 +21,26 @@ export function isCountPerActorMath(math: string | undefined): math is CountPerA
 
 export function getDefaultPropertyMathType(
     math: string | undefined,
-    allowedMathTypes: readonly string[] | undefined
+    allowedMathTypes: readonly string[] | undefined,
+    isHistogramBreakdown?: boolean
 ): PropertyMathType {
+    // Median isn't supported when rolling up histogram buckets, so fall back to average there
+    const defaultMathType = isHistogramBreakdown ? PropertyMathType.Average : PropertyMathType.Median
     if (isPropertyValueMath(math)) {
         return math
     }
     if (allowedMathTypes?.length) {
-        const propertyMathTypes = allowedMathTypes.filter(isPropertyValueMath)
-        return (propertyMathTypes[0] as PropertyMathType) || PropertyMathType.Average
+        let propertyMathTypes = allowedMathTypes.filter(isPropertyValueMath)
+        if (isHistogramBreakdown) {
+            propertyMathTypes = propertyMathTypes.filter((mathType) =>
+                SUPPORTED_PROPERTY_MATH_FOR_HISTOGRAM_BREAKDOWN.has(mathType)
+            )
+        }
+        return propertyMathTypes[0] || defaultMathType
     }
-    return PropertyMathType.Average
+    return defaultMathType
+}
+
+export function getDefaultMathHogQLExpression(insightType?: InsightType): string {
+    return insightType === InsightType.STICKINESS ? 'person_id' : 'count()'
 }

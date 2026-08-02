@@ -45,6 +45,19 @@ def convert_context_message_to_anthropic_message(message: ContextMessage) -> mes
     return messages.HumanMessage(content=[{"type": "text", "text": message.content}])
 
 
+def _get_provenance_note(message: AssistantMessage) -> str | None:
+    if not message.meta or not message.meta.source:
+        return None
+    source = message.meta.source
+    if source.startswith("slash_command:"):
+        command_name = source.split(":", 1)[1]
+        return (
+            f"[System note: the previous assistant message was produced by the /{command_name} slash command. "
+            "It is deterministic PostHog code, not assistant-authored content.]"
+        )
+    return None
+
+
 def convert_assistant_message_to_anthropic_message(
     message: AssistantMessage, tool_result_map: Mapping[str, AssistantToolCallMessage]
 ) -> list[messages.BaseMessage]:
@@ -75,6 +88,12 @@ def convert_assistant_message_to_anthropic_message(
                 content=[{"type": "tool_result", "tool_use_id": tool_call_id, "content": result_message.content}],
             ),
         )
+
+    # Provenance note goes as a follow-up HumanMessage rather than prefilling the AIMessage
+    # — prefilling assistant content isn't supported in Sonnet 4.6+.
+    provenance_note = _get_provenance_note(message)
+    if provenance_note:
+        history.append(messages.HumanMessage(content=[{"type": "text", "text": provenance_note}]))
 
     return history
 
@@ -109,4 +128,26 @@ def convert_to_anthropic_messages(
             history.extend(convert_to_anthropic_message(message, tool_result_map))
         except ValueError:
             continue
-    return history
+    return drop_trailing_assistant_messages(history)
+
+
+def drop_trailing_assistant_messages(history: list[messages.BaseMessage]) -> list[messages.BaseMessage]:
+    """Drop assistant messages the conversation ends on, so we never prefill.
+
+    Anthropic reads a trailing assistant turn as content to continue from, which Sonnet 4.6 and
+    later reject outright. A conversation can end on one when a tool appended its own assistant
+    message after the tool result, which the pre-migration `summarize_sessions` did to render its
+    "Open report" button.
+
+    Assistant messages carrying tool calls are left in place: dropping one would orphan the tool
+    result that follows it, which Anthropic rejects too.
+    """
+    end = len(history)
+    while end > 0:
+        message = history[end - 1]
+        if not isinstance(message, messages.AIMessage) or message.tool_calls:
+            break
+        end -= 1
+    # A history that is nothing but assistant messages has no valid prefix to send, so leave it
+    # alone and let the caller's own validation report it.
+    return history[:end] if end > 0 else history

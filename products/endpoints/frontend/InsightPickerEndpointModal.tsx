@@ -1,8 +1,9 @@
 import { useActions, useValues } from 'kea'
 import { BindLogic } from 'kea'
 
-import { IconEndpoints, IconFunnels, IconPlus, IconRetention, IconTrends } from '@posthog/icons'
+import { IconEndpoints, IconPlus } from '@posthog/icons'
 
+import { IconInsightRetention, IconInsightTrends } from 'lib/lemon-ui/icons'
 import { LemonButton } from 'lib/lemon-ui/LemonButton'
 import { LemonModal } from 'lib/lemon-ui/LemonModal'
 import { Popover } from 'lib/lemon-ui/Popover'
@@ -11,7 +12,7 @@ import { INSIGHT_TYPES_METADATA } from 'scenes/saved-insights/SavedInsights'
 import { SavedInsightsTable } from 'scenes/saved-insights/SavedInsightsTable'
 import { urls } from 'scenes/urls'
 
-import { HogQLQuery, InsightQueryNode } from '~/queries/schema/schema-general'
+import { EndpointQueryNode, HogQLQuery, NodeKind } from '~/queries/schema/schema-general'
 import { isNodeWithSource } from '~/queries/utils'
 import { InsightType, QueryBasedInsightModel } from '~/types'
 
@@ -19,32 +20,47 @@ import { EndpointFromInsightModal } from './EndpointFromInsightModal'
 import { endpointLogic } from './endpointLogic'
 import { insightPickerEndpointModalLogic } from './insightPickerEndpointModalLogic'
 
-const QUICK_CREATE_TYPES = [
-    { type: InsightType.TRENDS, icon: IconTrends, label: 'Trend' },
-    { type: InsightType.FUNNELS, icon: IconFunnels, label: 'Funnel' },
-    { type: InsightType.RETENTION, icon: IconRetention, label: 'Retention' },
-]
+const UNSUPPORTED_INSIGHT_TYPES = new Set([
+    InsightType.FUNNELS,
+    InsightType.PATHS,
+    InsightType.STICKINESS,
+    InsightType.JSON,
+    InsightType.HOG,
+])
 
-interface InsightPickerEndpointModalProps {
-    tabId: string
+const UNSUPPORTED_QUERY_KINDS = new Set([NodeKind.FunnelsQuery, NodeKind.PathsQuery, NodeKind.StickinessQuery])
+
+function isInsightSupported(insight: QueryBasedInsightModel): boolean {
+    const query = insight.query
+    if (!query) {
+        return true
+    }
+    const kind = isNodeWithSource(query) ? (query as { source?: { kind?: string } }).source?.kind : query.kind
+    return !kind || !UNSUPPORTED_QUERY_KINDS.has(kind as NodeKind)
 }
 
-export function InsightPickerEndpointModal({ tabId }: InsightPickerEndpointModalProps): JSX.Element {
+const QUICK_CREATE_TYPES = [
+    { type: InsightType.TRENDS, icon: IconInsightTrends, label: 'Trend' },
+    { type: InsightType.RETENTION, icon: IconInsightRetention, label: 'Retention' },
+]
+
+export function InsightPickerEndpointModal(): JSX.Element {
     const { isOpen, selectedInsight, showMoreInsightTypes } = useValues(insightPickerEndpointModalLogic)
     const { closeModal, selectInsight, toggleShowMoreInsightTypes } = useActions(insightPickerEndpointModalLogic)
-    const { openCreateFromInsightModal } = useActions(endpointLogic({ tabId }))
+    const { openCreateFromInsightModal } = useActions(endpointLogic)
 
-    const insightQuery: HogQLQuery | InsightQueryNode | null = selectedInsight?.query
+    // Safe cast: unsupported query types (FunnelsQuery, PathsQuery, StickinessQuery)
+    // are filtered out via isInsightSupported on the SavedInsightsTable
+    const insightQuery: HogQLQuery | EndpointQueryNode | null = selectedInsight?.query
         ? isNodeWithSource(selectedInsight.query)
-            ? (selectedInsight.query.source as HogQLQuery | InsightQueryNode)
-            : (selectedInsight.query as HogQLQuery | InsightQueryNode)
+            ? (selectedInsight.query.source as unknown as HogQLQuery | EndpointQueryNode)
+            : (selectedInsight.query as unknown as HogQLQuery | EndpointQueryNode)
         : null
 
     const additionalTypes = Object.entries(INSIGHT_TYPES_METADATA).filter(
         ([type, meta]) =>
             meta.inMenu &&
-            type !== InsightType.JSON &&
-            type !== InsightType.HOG &&
+            !UNSUPPORTED_INSIGHT_TYPES.has(type as InsightType) &&
             !QUICK_CREATE_TYPES.some((qt) => qt.type === type)
     )
 
@@ -124,6 +140,7 @@ export function InsightPickerEndpointModal({ tabId }: InsightPickerEndpointModal
                                     selectInsight(insight)
                                     openCreateFromInsightModal()
                                 }}
+                                filterFn={isInsightSupported}
                             />
                         </div>
                     </div>
@@ -131,11 +148,7 @@ export function InsightPickerEndpointModal({ tabId }: InsightPickerEndpointModal
             </BindLogic>
 
             {insightQuery && (
-                <EndpointFromInsightModal
-                    tabId={tabId}
-                    insightQuery={insightQuery}
-                    insightShortId={selectedInsight?.short_id}
-                />
+                <EndpointFromInsightModal insightQuery={insightQuery} insightShortId={selectedInsight?.short_id} />
             )}
         </>
     )

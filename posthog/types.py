@@ -1,6 +1,7 @@
 from typing import Union
 
 from posthog.schema import (
+    AccountCustomPropertyFilter,
     ActionsNode,
     CohortPropertyFilter,
     DataWarehouseNode,
@@ -29,7 +30,9 @@ from posthog.schema import (
     LifecycleQuery,
     LogEntryPropertyFilter,
     LogPropertyFilter,
+    MetricPropertyFilter,
     PathsQuery,
+    PersonMetadataPropertyFilter,
     PersonPropertyFilter,
     RecordingPropertyFilter,
     RetentionQuery,
@@ -39,6 +42,7 @@ from posthog.schema import (
     StickinessActorsQuery,
     StickinessQuery,
     TrendsQuery,
+    WorkflowVariablePropertyFilter,
 )
 
 from posthog.models.filters.filter import Filter
@@ -58,9 +62,11 @@ type InsightActorsQueryNode = Union[
 type AnyPropertyFilter = Union[
     EventPropertyFilter,
     PersonPropertyFilter,
+    PersonMetadataPropertyFilter,
     ElementPropertyFilter,
     EventMetadataPropertyFilter,
     RevenueAnalyticsPropertyFilter,
+    AccountCustomPropertyFilter,
     SessionPropertyFilter,
     LogEntryPropertyFilter,
     CohortPropertyFilter,
@@ -74,7 +80,9 @@ type AnyPropertyFilter = Union[
     DataWarehousePersonPropertyFilter,
     ErrorTrackingIssueFilter,
     LogPropertyFilter,
+    MetricPropertyFilter,
     SpanPropertyFilter,
+    WorkflowVariablePropertyFilter,
 ]
 
 type EntityNode = Union[

@@ -1,5 +1,5 @@
-import { Replayer, canvasMutation } from '@posthog/rrweb'
-import { ReplayPlugin } from '@posthog/rrweb'
+import { Replayer, canvasMutation } from 'posthog-js/rrweb'
+import { ReplayPlugin } from 'posthog-js/rrweb'
 import {
     CanvasArg,
     EventType,
@@ -7,7 +7,7 @@ import {
     canvasMutationData,
     canvasMutationParam,
     eventWithTime,
-} from '@posthog/rrweb-types'
+} from 'posthog-js/rrweb-types'
 
 import { debounce } from '../utils'
 import { deserializeCanvasArg } from './deserialize-canvas-args'
@@ -62,13 +62,14 @@ const noOpErrorHandler: CanvasPluginErrorHandler = () => {}
 export const CanvasReplayerPlugin = (
     events: eventWithTime[],
     onError: CanvasPluginErrorHandler = noOpErrorHandler
-): ReplayPlugin => {
+): ReplayPlugin & { destroy: () => void } => {
     const canvases = new Map<number, HTMLCanvasElement>([])
     const containers = new Map<number, HTMLImageElement>([])
     const imageMap = new Map<eventWithTime | string, HTMLImageElement>()
     const canvasEventMap = new Map<eventWithTime | string, canvasMutationParam>()
     const pruneQueue: eventWithTime[] = []
     let nextPreloadIndex: number | null = null
+    let destroyed = false
 
     const canvasMutationEvents = events.filter(isCanvasMutation)
 
@@ -237,7 +238,7 @@ export const CanvasReplayerPlugin = (
         if (img && originalCanvas) {
             target.toBlob(
                 (blob) => {
-                    if (!blob) {
+                    if (!blob || destroyed) {
                         return
                     }
 
@@ -367,6 +368,15 @@ export const CanvasReplayerPlugin = (
 
                 for (let i = 0; i < canvasElement.attributes.length; i++) {
                     const attr = canvasElement.attributes[i]
+                    const name = attr.name.toLowerCase()
+                    // The reconstructed <img> lives in the top-level document, so it inherits only
+                    // presentational attributes from the recorded canvas. Skip inline event handlers
+                    // (every handler is named `on<event>`, so this covers the whole class) and the
+                    // URL-loading attributes — the plugin points `src` at the rendered canvas blob
+                    // itself, so a copied `src`/`srcset` would only fetch an attacker-controlled URL.
+                    if (name.startsWith('on') || name === 'src' || name === 'srcset') {
+                        continue
+                    }
                     el.setAttribute(attr.name, attr.value)
                 }
 
@@ -392,5 +402,27 @@ export const CanvasReplayerPlugin = (
                 void processMutation(e, replayer).catch(onError)
             }
         },
-    } as ReplayPlugin
+
+        destroy: () => {
+            destroyed = true
+
+            for (const controller of controllerById.values()) {
+                controller.abort()
+            }
+            controllerById.clear()
+
+            for (const [id] of objectUrlsById) {
+                revokeAllForIdExcept(id)
+            }
+            objectUrlsById.clear()
+
+            canvases.clear()
+            containers.clear()
+            imageMap.clear()
+            canvasEventMap.clear()
+            handleQueue.clear()
+            pruneQueue.length = 0
+            nextPreloadIndex = null
+        },
+    }
 }

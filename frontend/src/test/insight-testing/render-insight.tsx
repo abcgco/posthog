@@ -5,7 +5,9 @@ import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 
 import { actionsModel } from '~/models/actionsModel'
 import { groupsModel } from '~/models/groupsModel'
-import { InsightVizNode, NodeKind, TrendsQuery } from '~/queries/schema/schema-general'
+import { FunnelsQuery, InsightVizNode, NodeKind, StickinessQuery, TrendsQuery } from '~/queries/schema/schema-general'
+import { QueryContext } from '~/queries/types'
+import { FunnelVizType } from '~/types'
 
 import { initKeaTests } from '../init'
 import { resetCapturedCharts } from './chartjs-mock'
@@ -14,11 +16,46 @@ import { setupInsightMocks, type SetupMocksOptions } from './mocks'
 export const INSIGHT_TEST_KEY = 'test-harness'
 export const INSIGHT_TEST_ID = `new-AdHoc.InsightViz.${INSIGHT_TEST_KEY}`
 
+// Loaded with `require` rather than a static import because it has to run after this
+// module's own imports are bound, or the circular dependency through InsightViz leaves the
+// binding undefined. Keep the call at module scope: it transforms and evaluates the entire
+// InsightViz graph on first use, costing ~1.9s against a cold Jest transform cache (which
+// CI always has, since the jest job restores no cache). From inside a render body that
+// cost lands on whichever test renders first and consumes most of Jest's 5s test budget.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { InsightViz } = require('~/queries/nodes/InsightViz/InsightViz')
+
+export type InsightQuery = TrendsQuery | FunnelsQuery | StickinessQuery
+
 export function buildTrendsQuery(overrides?: Partial<TrendsQuery>): TrendsQuery {
     return {
         kind: NodeKind.TrendsQuery,
         series: [{ kind: NodeKind.EventsNode, event: '$pageview', name: '$pageview' }],
         ...overrides,
+    }
+}
+
+export function buildStickinessQuery(overrides?: Partial<StickinessQuery>): StickinessQuery {
+    return {
+        kind: NodeKind.StickinessQuery,
+        series: [{ kind: NodeKind.EventsNode, event: '$pageview', name: '$pageview' }],
+        interval: 'day',
+        ...overrides,
+    }
+}
+
+export function buildFunnelsQuery(overrides?: Partial<FunnelsQuery>): FunnelsQuery {
+    return {
+        kind: NodeKind.FunnelsQuery,
+        series: [
+            { kind: NodeKind.EventsNode, event: '$pageview', name: '$pageview' },
+            { kind: NodeKind.EventsNode, event: 'Napped', name: 'Napped' },
+        ],
+        ...overrides,
+        funnelsFilter: {
+            funnelVizType: FunnelVizType.Trends,
+            ...overrides?.funnelsFilter,
+        },
     }
 }
 
@@ -51,14 +88,30 @@ export function renderWithInsights(props: RenderWithInsightsProps): ReturnType<t
     return render(props.component)
 }
 
-export interface RenderInsightPageProps {
-    query?: TrendsQuery
+export interface RenderInsightProps {
+    query?: InsightQuery
     showFilters?: boolean
     mocks?: SetupMocksOptions
     featureFlags?: Record<string, string | boolean>
+    context?: QueryContext<InsightVizNode>
+    inSharedMode?: boolean
+    /** Render as a fixed-height dashboard/card tile rather than the full insight page. */
+    embedded?: boolean
 }
 
-function InsightWrapper({ query, showFilters = false }: { query: TrendsQuery; showFilters: boolean }): JSX.Element {
+function InsightWrapper({
+    query,
+    showFilters = false,
+    context,
+    inSharedMode,
+    embedded,
+}: {
+    query: InsightQuery
+    showFilters: boolean
+    context?: QueryContext<InsightVizNode>
+    inSharedMode?: boolean
+    embedded?: boolean
+}): JSX.Element {
     const [vizQuery, setVizQuery] = useState<InsightVizNode>({
         kind: NodeKind.InsightVizNode,
         source: query,
@@ -67,16 +120,36 @@ function InsightWrapper({ query, showFilters = false }: { query: TrendsQuery; sh
         full: showFilters,
     })
 
-    // Dynamic require to break a circular-dependency cycle that causes Jest to fail
-    // with static imports. Node's module cache means this is only resolved once.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { InsightViz } = require('~/queries/nodes/InsightViz/InsightViz')
-
-    return <InsightViz uniqueKey={INSIGHT_TEST_KEY} query={vizQuery} setQuery={setVizQuery} />
+    return (
+        <InsightViz
+            uniqueKey={INSIGHT_TEST_KEY}
+            query={vizQuery}
+            setQuery={setVizQuery}
+            context={context}
+            inSharedMode={inSharedMode}
+            embedded={embedded}
+        />
+    )
 }
 
-export function renderInsightPage(props: RenderInsightPageProps = {}): ReturnType<typeof render> {
+export function renderInsight(props: RenderInsightProps = {}): ReturnType<typeof render> {
     setupTestEnvironment(props.mocks, props.featureFlags)
 
-    return render(<InsightWrapper query={props.query ?? buildTrendsQuery()} showFilters={props.showFilters ?? true} />)
+    return render(
+        <InsightWrapper
+            query={props.query ?? buildTrendsQuery()}
+            showFilters={props.showFilters ?? false}
+            context={props.context}
+            inSharedMode={props.inSharedMode}
+            embedded={props.embedded}
+        />
+    )
+}
+
+/** Render the full insight page including the filter editor UI (header, series
+ *  editor, breakdown, display config). Mounting all of that roughly doubles a
+ *  test's runtime versus the chart-only `renderInsight`, so reach for this only
+ *  when the test interacts with the filter controls themselves. */
+export function renderInsightPage(props: RenderInsightProps = {}): ReturnType<typeof render> {
+    return renderInsight({ ...props, showFilters: props.showFilters ?? true })
 }

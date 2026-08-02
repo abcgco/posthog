@@ -1,7 +1,9 @@
 from typing import cast
 
 from posthoganalytics import capture_exception
+from rest_framework import serializers, status
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -13,16 +15,20 @@ from posthog.hogql import ast
 from posthog.hogql.database.database import Database
 from posthog.hogql.query import execute_hogql_query
 
+from posthog.api.documentation import _FallbackSerializer
 from posthog.api.routing import TeamAndOrgViewSetMixin
 from posthog.clickhouse.query_tagging import Feature, tag_queries
 from posthog.models.team.team import Team
+from posthog.models.user import User
+from posthog.rbac.user_access_control import AccessControlLevelResource, UserAccessControl
 
+from products.revenue_analytics.backend.joins import ensure_person_join_for_team, remove_person_join_for_team
 from products.revenue_analytics.backend.views import RevenueAnalyticsBaseView
 from products.revenue_analytics.backend.views.schemas import SCHEMAS as VIEW_SCHEMAS
 
 
 # Extracted to a separate function to be reused in the TaxonomyAgentToolkit
-def find_values_for_revenue_analytics_property(key: str, team: Team) -> list[str]:
+def find_values_for_revenue_analytics_property(key: str, team: Team, user: User) -> list[str]:
     # Get the scope from before the first dot
     # and if there's no dot then it's the base case which is RevenueAnalyticsRevenueItemView
     scope, *chain = key.split(".")
@@ -30,7 +36,7 @@ def find_values_for_revenue_analytics_property(key: str, team: Team) -> list[str
         chain = [scope]
         scope = "revenue_analytics_revenue_item"
 
-    database = Database.create_for(team=team)
+    database = Database.create_for(team=team, user=user)
     schema = VIEW_SCHEMAS[DatabaseSchemaManagedViewTableKind(scope)]
 
     # Try and find the union view for this class
@@ -63,7 +69,7 @@ def find_values_for_revenue_analytics_property(key: str, team: Team) -> list[str
     values = []
     try:
         tag_queries(product=ProductKey.REVENUE_ANALYTICS, feature=Feature.QUERY)
-        result = execute_hogql_query(query, team=team)
+        result = execute_hogql_query(query, team=team, user=user)
         values = [row[0] for row in result.results]
     except Exception as e:
         capture_exception(e)
@@ -72,15 +78,50 @@ def find_values_for_revenue_analytics_property(key: str, team: Team) -> list[str
     return values
 
 
+# `scope_object = "INTERNAL"` opts these viewsets out of the framework's resource-level
+# access-control check, so enforce `revenue_analytics` access here to match the query runners.
+def _assert_revenue_analytics_access(team: Team, user: User, required_level: AccessControlLevelResource) -> None:
+    if not UserAccessControl(user=user, team=team).check_access_level_for_resource("revenue_analytics", required_level):
+        raise PermissionDenied("You don't have access to revenue analytics in this project.")
+
+
 class RevenueAnalyticsTaxonomyViewSet(TeamAndOrgViewSetMixin, GenericViewSet):
     scope_object = "INTERNAL"
+    serializer_class = _FallbackSerializer
     permission_classes = [IsAuthenticated]
 
     @action(methods=["GET"], detail=False)
     def values(self, request: Request, **kwargs):
+        _assert_revenue_analytics_access(self.team, cast(User, request.user), "viewer")
+
         key = request.GET.get("key")
         if key is None:
             return Response({"results": [], "refreshing": False})
 
-        values = find_values_for_revenue_analytics_property(key, self.team)
+        values = find_values_for_revenue_analytics_property(key, self.team, cast(User, request.user))
         return Response({"results": [{"name": value} for value in values], "refreshing": False})
+
+
+class RevenueAnalyticsJoinSerializer(serializers.Serializer):
+    enabled = serializers.BooleanField(required=True)
+
+
+class RevenueAnalyticsJoinViewSet(TeamAndOrgViewSetMixin, GenericViewSet):
+    scope_object = "INTERNAL"
+    serializer_class = _FallbackSerializer
+    permission_classes = [IsAuthenticated]
+
+    def create(self, request: Request, **kwargs):
+        _assert_revenue_analytics_access(self.team, cast(User, request.user), "editor")
+
+        serializer = RevenueAnalyticsJoinSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if serializer.validated_data["enabled"]:
+            ensure_person_join_for_team(self.team.pk)
+            msg = "Joins created successfully"
+        else:
+            remove_person_join_for_team(self.team.pk)
+            msg = "Joins removed successfully"
+
+        return Response({"detail": msg}, status=status.HTTP_200_OK)

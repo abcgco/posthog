@@ -8,6 +8,7 @@ import {
     IconLeave,
     IconList,
     IconLogomark,
+    IconPerson,
     IconPlay,
     IconServer,
 } from '@posthog/icons'
@@ -74,9 +75,32 @@ export function getPropertyDefinitionIcon(definition: PropertyDefinition): JSX.E
     )
 }
 
+export function getPersonPropertyDefinitionIcon(definition: PropertyDefinition): JSX.Element {
+    if (CORE_FILTER_DEFINITIONS_BY_GROUP.person_properties[definition.name]) {
+        return (
+            <IconWithBadge
+                icon={<IconLogomark />}
+                tooltipTitle="PostHog person property"
+                className="taxonomy-icon taxonomy-icon-muted"
+                verified={definition.verified}
+                hidden={definition.hidden}
+            />
+        )
+    }
+    return (
+        <IconWithBadge
+            icon={<IconPerson />}
+            tooltipTitle="Person property"
+            className="taxonomy-icon taxonomy-icon-muted"
+            verified={definition.verified}
+            hidden={definition.hidden}
+        />
+    )
+}
+
 export function getEventDefinitionIcon(definition: EventDefinition & { value?: string | null }): JSX.Element {
     // Rest are events
-    if (definition.id === '$pageview' || definition.id === '$screen') {
+    if (definition.name === '$pageview' || definition.name === '$screen') {
         return (
             <IconWithBadge
                 icon={<IconEye />}
@@ -87,7 +111,7 @@ export function getEventDefinitionIcon(definition: EventDefinition & { value?: s
             />
         )
     }
-    if (definition.id === '$pageleave') {
+    if (definition.name === '$pageleave') {
         return (
             <IconWithBadge
                 icon={<IconLeave />}
@@ -98,7 +122,7 @@ export function getEventDefinitionIcon(definition: EventDefinition & { value?: s
             />
         )
     }
-    if (definition.id === '$autocapture') {
+    if (definition.name === '$autocapture') {
         return (
             <IconWithBadge
                 icon={<IconBolt />}
@@ -109,7 +133,7 @@ export function getEventDefinitionIcon(definition: EventDefinition & { value?: s
             />
         )
     }
-    if (definition.id && !!CORE_FILTER_DEFINITIONS_BY_GROUP.events[definition.id]) {
+    if (definition.name && !!CORE_FILTER_DEFINITIONS_BY_GROUP.events[definition.name]) {
         return (
             <IconWithBadge
                 icon={<IconLogomark />}
@@ -165,14 +189,14 @@ export function getEventDefinitionIcon(definition: EventDefinition & { value?: s
 }
 
 export function getEventMetadataDefinitionIcon(definition: PropertyDefinition): JSX.Element {
-    if (CORE_FILTER_DEFINITIONS_BY_GROUP.event_metadata[definition.id]) {
+    if (CORE_FILTER_DEFINITIONS_BY_GROUP.event_metadata[definition.name]) {
         return <IconLogomark />
     }
     return <IconList />
 }
 
 export function getRevenueAnalyticsDefinitionIcon(definition: PropertyDefinition): JSX.Element {
-    if (CORE_FILTER_DEFINITIONS_BY_GROUP.revenue_analytics_properties[definition.id]) {
+    if (CORE_FILTER_DEFINITIONS_BY_GROUP.revenue_analytics_properties[definition.name]) {
         return <IconLogomark />
     }
 

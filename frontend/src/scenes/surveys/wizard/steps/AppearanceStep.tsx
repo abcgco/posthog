@@ -20,7 +20,14 @@ import {
     SurveyQuestionType,
 } from '~/types'
 
-import { NewSurvey, SurveyTheme, WEB_SAFE_FONTS, defaultSurveyAppearance, surveyThemes } from '../../constants'
+import {
+    NewSurvey,
+    SurveyTheme,
+    WEB_SAFE_FONTS,
+    defaultSurveyAppearance,
+    getMatchingSurveyThemeId,
+} from '../../constants'
+import { SurveyBehaviorOptions } from '../../survey-appearance/SurveyBehaviorOptions'
 import { SurveyAppearancePreview } from '../../SurveyAppearancePreview'
 import { surveyLogic } from '../../surveyLogic'
 import { surveysLogic } from '../../surveysLogic'
@@ -29,8 +36,8 @@ import { SurveyThemeSelector } from '../SurveyThemeSelector'
 import { WizardSection } from '../WizardLayout'
 
 export function AppearanceStep(): JSX.Element {
-    const { survey } = useValues(surveyLogic)
-    const { setSurveyValue } = useActions(surveyLogic)
+    const { survey, hasBranchingLogic } = useValues(surveyLogic)
+    const { setSurveyValue, deleteBranchingLogic } = useActions(surveyLogic)
     const { surveysStylingAvailable } = useValues(surveysLogic)
     const { guardAvailableFeature } = useValues(upgradeModalLogic)
     const { isDarkModeOn } = useValues(themeLogic)
@@ -39,18 +46,9 @@ export function AppearanceStep(): JSX.Element {
     const [previewBackground, setPreviewBackground] = useState<'light' | 'dark'>(() =>
         isDarkModeOn ? 'dark' : 'light'
     )
-    const [selectedThemeId, setSelectedThemeId] = useState<string | null>(() => {
-        const currentAppearance = survey.appearance
-        if (!currentAppearance) {
-            return 'clean'
-        }
-        const matchingTheme = surveyThemes.find(
-            (theme) =>
-                theme.appearance.backgroundColor === currentAppearance.backgroundColor &&
-                theme.appearance.submitButtonColor === currentAppearance.submitButtonColor
-        )
-        return matchingTheme?.id || null
-    })
+    const [selectedThemeId, setSelectedThemeId] = useState<string | null>(() =>
+        getMatchingSurveyThemeId(survey.appearance)
+    )
 
     const appearance: SurveyAppearance = { ...defaultSurveyAppearance, ...survey.appearance }
     const hasRatingButtons = survey.questions?.some((q) => q.type === SurveyQuestionType.Rating)
@@ -173,6 +171,17 @@ export function AppearanceStep(): JSX.Element {
                         }
                     }}
                 />
+
+                {/* Question behavior */}
+                <WizardSection title="Behavior" titleClassName="text-sm font-medium">
+                    <SurveyBehaviorOptions
+                        survey={survey}
+                        onAppearanceChange={onAppearanceChange}
+                        hasBranchingLogic={hasBranchingLogic}
+                        deleteBranchingLogic={deleteBranchingLogic}
+                        onTranslationsChange={(translations) => setSurveyValue('translations', translations)}
+                    />
+                </WizardSection>
 
                 {/* Advanced options */}
                 <LemonCollapse

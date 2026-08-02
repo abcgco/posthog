@@ -10,9 +10,9 @@ import collections.abc
 import orjson
 import pyarrow as pa
 
-from posthog.batch_exports.models import BatchExportRun
 from posthog.temporal.common.logger import get_write_only_logger
 
+from products.batch_exports.backend.models.batch_export import BatchExportRun
 from products.batch_exports.backend.service import aupdate_batch_export_run
 from products.batch_exports.backend.temporal.pipeline.types import BatchExportResult
 
@@ -21,8 +21,8 @@ LOGGER = get_write_only_logger(__name__)
 
 
 def peek_first_and_rewind(
-    gen: collections.abc.Generator[T, None, None],
-) -> tuple[T | None, collections.abc.Generator[T, None, None]]:
+    gen: collections.abc.Generator[T],
+) -> tuple[T | None, collections.abc.Generator[T]]:
     """Peek into the first element in a generator and rewind the advance.
 
     The generator is advanced and cannot be reversed, so we create a new one that first
@@ -36,7 +36,7 @@ def peek_first_and_rewind(
     except StopIteration:
         first = None
 
-    def rewind_gen() -> collections.abc.Generator[T, None, None]:
+    def rewind_gen() -> collections.abc.Generator[T]:
         """Yield the item we popped to rewind the generator.
 
         Return early if the generator is empty.
@@ -51,8 +51,8 @@ def peek_first_and_rewind(
 
 
 async def apeek_first_and_rewind(
-    gen: collections.abc.AsyncGenerator[T, None],
-) -> tuple[T | None, collections.abc.AsyncGenerator[T, None]]:
+    gen: collections.abc.AsyncGenerator[T],
+) -> tuple[T | None, collections.abc.AsyncGenerator[T]]:
     """Peek into the first element in a generator and rewind the advance.
 
     The generator is advanced and cannot be reversed, so we create a new one that first
@@ -66,7 +66,7 @@ async def apeek_first_and_rewind(
     except StopAsyncIteration:
         first = None
 
-    async def rewind_gen() -> collections.abc.AsyncGenerator[T, None]:
+    async def rewind_gen() -> collections.abc.AsyncGenerator[T]:
         """Yield the item we popped to rewind the generator.
 
         Return early if the generator is empty.
@@ -83,7 +83,7 @@ async def apeek_first_and_rewind(
 
 
 @contextlib.asynccontextmanager
-async def set_status_to_running_task(run_id: str | None) -> collections.abc.AsyncGenerator[asyncio.Task | None, None]:
+async def set_status_to_running_task(run_id: str | None) -> collections.abc.AsyncGenerator[asyncio.Task | None]:
     """Manage a background task to set a batch export run status to 'RUNNING'.
 
     This is intended to be used within a batch export's 'insert_*' activity. These activities cannot afford
@@ -123,7 +123,7 @@ async def set_status_to_running_task(run_id: str | None) -> collections.abc.Asyn
 class JsonScalar(pa.ExtensionScalar):
     """Represents a JSON binary string."""
 
-    def as_py(self) -> dict | None:
+    def as_py(self, *, maps_as_pydicts: typing.Literal["lossy", "strict"] | None = None) -> dict | None:
         """Try to convert value to Python representation.
 
         We attempt to decode the value returned by `as_py` as JSON. However, to do so safely we must
@@ -267,7 +267,7 @@ def make_retryable_with_exponential_backoff(
     Arguments:
         func: The coroutine to retry.
         timeout: How long to wait for the coroutine to run.
-        max_attempts: Limit number of retry attempts. Set to 0 for no limit.
+        max_attempts: Limit number of retry attempts. Set to `None` for no limit.
         initial_retry_delay: Delay for the first retry.
         max_retry_delay: Maximum possible delay between any attempts.
         exponential_backoff_coefficient: Exponential factor used to scale
@@ -279,6 +279,21 @@ def make_retryable_with_exponential_backoff(
             example, the same exception class can be retried or not depending on a code
             or message attribute.
         max_delay_jitter: Maximum jitter added to every retry delay.
+
+    Examples:
+        Retry an error forever:
+
+        >>> class MyError(Exception):
+        ...     pass
+        >>> async def my_coro():
+        ...     raise MyError
+        >>> retryable_coro = make_retryable_with_exponential_backoff(my_coro, max_attempts=None, retryable_exceptions=(MyError,))
+
+        Filter which errors to retry on based on message contents:
+
+        >>> def _is_exception_retryable(exc: Exception):
+        ...     return "message" in str(exc)
+        >>> retryable_coro = make_retryable_with_exponential_backoff(my_coro, is_exception_retryable=_is_exception_retryable)
     """
 
     @functools.wraps(func)

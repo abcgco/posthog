@@ -10,7 +10,7 @@ import { ResizerLogicProps, resizerLogic } from 'lib/components/Resizer/resizerL
 import { FEATURE_FLAGS } from 'lib/constants'
 import { integrationsLogic } from 'lib/integrations/integrationsLogic'
 import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
-import { capitalizeFirstLetter, splitKebabCase } from 'lib/utils'
+import { capitalizeFirstLetter, splitKebabCase } from 'lib/utils/strings'
 
 import { SessionRecordingSidebarStacking, SessionRecordingSidebarTab } from '~/types'
 
@@ -22,13 +22,13 @@ import { PlayerSidebarTab } from './sidebar/PlayerSidebarTab'
 export function PlayerSidebar(): JSX.Element {
     const ref = useRef<HTMLDivElement>(null)
 
-    const { featureFlags } = useValues(featureFlagLogic)
     const { activeTab } = useValues(playerSidebarLogic)
     const { setTab } = useActions(playerSidebarLogic)
     const { sidebarOpen, preferredSidebarStacking, isVerticallyStacked } = useValues(playerSettingsLogic)
     const { setSidebarOpen, setPreferredSidebarStacking } = useActions(playerSettingsLogic)
     const { getIntegrationsByKind } = useValues(integrationsLogic)
     const { sessionPlayerMetaData } = useValues(sessionRecordingPlayerLogic)
+    const { featureFlags } = useValues(featureFlagLogic)
 
     const logicKey = `player-sidebar-${isVerticallyStacked ? 'vertical' : 'horizontal'}`
 
@@ -50,9 +50,9 @@ export function PlayerSidebar(): JSX.Element {
         SessionRecordingSidebarTab.NETWORK_WATERFALL,
     ]
 
-    // Show AI summary tab in the second position if the flag is enabled
-    if (featureFlags[FEATURE_FLAGS.AI_SESSION_SUMMARY] || featureFlags[FEATURE_FLAGS.MAX_SESSION_SUMMARIZATION]) {
-        sidebarTabs.splice(1, 0, SessionRecordingSidebarTab.SESSION_SUMMARY)
+    // Show the person's other recordings once we know who they are
+    if (featureFlags[FEATURE_FLAGS.REPLAY_PLAYER_PERSON_SESSIONS_TAB] && sessionPlayerMetaData?.person) {
+        sidebarTabs.push(SessionRecordingSidebarTab.SESSIONS)
     }
 
     // Show linked issues tab if there are integrations or existing references
@@ -93,19 +93,10 @@ export function PlayerSidebar(): JSX.Element {
                         <LemonTabs
                             activeKey={activeTab}
                             onChange={(tabId) => setTab(tabId)}
-                            tabs={sidebarTabs.map((tabId) => {
-                                if (tabId === SessionRecordingSidebarTab.SESSION_SUMMARY) {
-                                    return {
-                                        key: tabId,
-                                        label: 'AI summary',
-                                    }
-                                }
-
-                                return {
-                                    key: tabId,
-                                    label: capitalizeFirstLetter(splitKebabCase(tabId)),
-                                }
-                            })}
+                            tabs={sidebarTabs.map((tabId) => ({
+                                key: tabId,
+                                label: capitalizeFirstLetter(splitKebabCase(tabId)),
+                            }))}
                             barClassName="!mb-0"
                             size="small"
                             className="overflow-x-auto hide-scrollbar"

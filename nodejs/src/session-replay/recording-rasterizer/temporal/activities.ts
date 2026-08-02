@@ -5,19 +5,30 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 
-import { BrowserPool } from '../capture/browser-pool'
-import { rasterizeRecording } from '../capture/recorder'
-import { RasterizationError } from '../errors'
-import { createLogger } from '../logger'
-import { RasterizationMetrics } from '../metrics'
-import { computeVideoTimestamps } from '../postprocess'
-import { uploadToS3 } from '../storage'
-import { ActivityTimings, RasterizeRecordingInput, RasterizeRecordingOutput } from '../types'
-import { elapsed } from '../utils'
+import { BrowserPool } from '~/session-replay/recording-rasterizer/capture/browser-pool'
+import { rasterizeRecording } from '~/session-replay/recording-rasterizer/capture/recorder'
+import { RasterizationError } from '~/session-replay/recording-rasterizer/errors'
+import { createLogger } from '~/session-replay/recording-rasterizer/logger'
+import { RasterizationMetrics } from '~/session-replay/recording-rasterizer/metrics'
+import { computeVideoTimestamps } from '~/session-replay/recording-rasterizer/postprocess'
+import { uploadToS3 } from '~/session-replay/recording-rasterizer/storage'
+import {
+    ActivityTimings,
+    RasterizationProgress,
+    RasterizeRecordingInput,
+    RasterizeRecordingOutput,
+} from '~/session-replay/recording-rasterizer/types'
+import { elapsed } from '~/session-replay/recording-rasterizer/utils'
 
 function toActivityError(err: unknown): Error {
-    if (err instanceof RasterizationError && !err.retryable) {
-        return ApplicationFailure.nonRetryable(err.message, 'NON_RETRYABLE', err)
+    if (err instanceof RasterizationError) {
+        // The code travels as the failure type either way, so a caller can tell a recording that can never render
+        // (NO_SNAPSHOTS) from one that merely ran out of retries. Retryability stays the player's call: NO_SNAPSHOTS is
+        // retryable while a recording is still being ingested, so the code is only conclusive once Temporal has spent
+        // the attempts.
+        return err.retryable
+            ? ApplicationFailure.retryable(err.message, err.code, err)
+            : ApplicationFailure.nonRetryable(err.message, err.code, err)
     }
     return err instanceof Error ? err : new Error(String(err))
 }
@@ -41,14 +52,28 @@ async function rasterizeRecordingActivity(
     const activityStart = process.hrtime()
     const id = randomUUID()
     const workDir = process.env.VIDEO_WORK_DIR || os.tmpdir()
-    const outputPath = path.join(workDir, `ph-video-${id}.mp4`)
+    const ext = input.output_format || 'mp4'
+    const outputPath = path.join(workDir, `ph-video-${id}.${ext}`)
 
     const timings: ActivityTimings = { total_s: 0, setup_s: 0, capture_s: 0, upload_s: 0 }
 
-    const onProgress = () => Context.current().heartbeat()
+    // Mutated in place by recorder.ts and capture.ts so each heartbeat carries
+    // the latest phase and frame count. Temporal exposes this via
+    // `pending_activities[].heartbeat_details` for the parent workflow to read.
+    const progress: RasterizationProgress = { phase: 'setup', frame: 0, estimatedTotalFrames: 0 }
+    const onProgress = (): void => Context.current().heartbeat(progress)
 
     try {
-        const result = await rasterizeRecording(pool, input, outputPath, playerHtml, onProgress, undefined, log)
+        const result = await rasterizeRecording(
+            pool,
+            input,
+            outputPath,
+            playerHtml,
+            onProgress,
+            progress,
+            undefined,
+            log
+        )
         timings.setup_s = result.timings.setup_s
         timings.capture_s = result.timings.capture_s
         RasterizationMetrics.observeSetup('success', timings.setup_s)
@@ -56,8 +81,11 @@ async function rasterizeRecordingActivity(
 
         const periods = computeVideoTimestamps(result.inactivity_periods)
 
+        progress.phase = 'upload'
+        onProgress()
         const uploadStart = process.hrtime()
-        const s3Uri = await uploadToS3(outputPath, input.s3_bucket, input.s3_key_prefix, id, onProgress)
+        const format = input.output_format || 'mp4'
+        const s3Uri = await uploadToS3(outputPath, input.s3_bucket, input.s3_key_prefix, id, format, onProgress)
         timings.upload_s = elapsed(uploadStart)
         RasterizationMetrics.observeUpload('success', timings.upload_s)
 

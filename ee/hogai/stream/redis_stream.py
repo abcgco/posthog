@@ -1,5 +1,4 @@
 import time
-import pickle
 import asyncio
 from collections.abc import AsyncGenerator, Callable
 from typing import Literal, Optional, cast
@@ -9,6 +8,7 @@ from django.conf import settings
 
 import structlog
 import redis.exceptions as redis_exceptions
+from opentelemetry import trace
 from prometheus_client import Histogram
 from pydantic import BaseModel, Field
 
@@ -22,11 +22,13 @@ from posthog.schema import (
 
 from posthog.redis import get_async_client
 
+from products.posthog_ai.backend.models.assistant import Conversation
+
 from ee.hogai.utils.types import AssistantOutput
 from ee.hogai.utils.types.base import ApprovalPayload, AssistantStreamedMessageUnion
-from ee.models.assistant import Conversation
 
 logger = structlog.get_logger(__name__)
+_tracer = trace.get_tracer(__name__)
 
 REDIS_TO_CLIENT_LATENCY_HISTOGRAM = Histogram(
     "posthog_ai_redis_to_client_latency_seconds",
@@ -154,12 +156,7 @@ class ConversationStreamSerializer:
             return None
 
         return {
-            # nosemgrep: python.lang.security.deserialization.pickle.avoid-pickle (internal Redis stream, data is self-generated)
-            self.serialization_key: pickle.dumps(
-                StreamEvent(
-                    event=event,
-                )
-            ),
+            self.serialization_key: StreamEvent(event=event).model_dump_json().encode("utf-8"),
         }
 
     def _to_message_event(self, message: AssistantStreamedMessageUnion) -> MessageEvent:
@@ -198,8 +195,7 @@ class ConversationStreamSerializer:
         )
 
     def deserialize(self, data: dict[bytes, bytes]) -> StreamEvent:
-        # nosemgrep: python.lang.security.deserialization.pickle.avoid-pickle (internal Redis stream, data is self-generated)
-        return pickle.loads(data[bytes(self.serialization_key, "utf-8")])
+        return StreamEvent.model_validate_json(data[bytes(self.serialization_key, "utf-8")])
 
 
 class StreamError(Exception):
@@ -234,42 +230,52 @@ class ConversationRedisStream:
         delay_increment = 0.15  # Increment by 150ms each attempt
         max_delay = 2.0  # Cap at 2 seconds
         timeout = 60.0  # 60 seconds timeout
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
         last_iteration_time = None
+        attempts = 0
 
-        while True:
-            current_time = time.time()
-            if last_iteration_time is not None:
-                iteration_duration = current_time - last_iteration_time
-                REDIS_STREAM_INIT_ITERATION_LATENCY_HISTOGRAM.observe(iteration_duration)
-            last_iteration_time = current_time
+        with _tracer.start_as_current_span(
+            "posthog_ai.redis_stream.wait_for_stream",
+            attributes={"posthog_ai.stream_key": self._stream_key},
+        ) as span:
+            while True:
+                current_time = time.time()
+                if last_iteration_time is not None:
+                    iteration_duration = current_time - last_iteration_time
+                    REDIS_STREAM_INIT_ITERATION_LATENCY_HISTOGRAM.observe(iteration_duration)
+                last_iteration_time = current_time
+                attempts += 1
 
-            elapsed_time = asyncio.get_event_loop().time() - start_time
-            if elapsed_time >= timeout:
+                elapsed_time = asyncio.get_running_loop().time() - start_time
+                if elapsed_time >= timeout:
+                    logger.debug(
+                        f"Stream creation timeout after {elapsed_time:.2f}s",
+                        stream_key=self._stream_key,
+                    )
+                    span.set_attribute("posthog_ai.poll_attempts", attempts)
+                    span.set_attribute("posthog_ai.outcome", "timeout")
+                    return False
+
+                if await self._redis_client.exists(self._stream_key):
+                    span.set_attribute("posthog_ai.poll_attempts", attempts)
+                    span.set_attribute("posthog_ai.outcome", "ready")
+                    return True
+
                 logger.debug(
-                    f"Stream creation timeout after {elapsed_time:.2f}s",
+                    f"Stream not found, retrying in {delay}s (elapsed: {elapsed_time:.2f}s)",
                     stream_key=self._stream_key,
                 )
-                return False
+                await asyncio.sleep(delay)
 
-            if await self._redis_client.exists(self._stream_key):
-                return True
-
-            logger.debug(
-                f"Stream not found, retrying in {delay}s (elapsed: {elapsed_time:.2f}s)",
-                stream_key=self._stream_key,
-            )
-            await asyncio.sleep(delay)
-
-            # Linear backoff
-            delay = min(delay + delay_increment, max_delay)
+                # Linear backoff
+                delay = min(delay + delay_increment, max_delay)
 
     async def read_stream(
         self,
         start_id: str = "0",
         block_ms: int = 50,  # Block for 50ms waiting for new messages
         count: Optional[int] = CONVERSATION_STREAM_CONCURRENT_READ_COUNT,
-    ) -> AsyncGenerator[StreamEvent, None]:
+    ) -> AsyncGenerator[StreamEvent]:
         """
         Read updates from Redis stream.
 
@@ -282,7 +288,7 @@ class ConversationRedisStream:
             RedisStreamEvent
         """
         current_id = start_id
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
         last_iteration_time = None
 
         while True:
@@ -292,7 +298,7 @@ class ConversationRedisStream:
                 REDIS_READ_ITERATION_LATENCY_HISTOGRAM.observe(iteration_duration)
             last_iteration_time = current_time
 
-            if asyncio.get_event_loop().time() - start_time > self._timeout:
+            if asyncio.get_running_loop().time() - start_time > self._timeout:
                 raise StreamError("Stream timeout - conversation took too long to complete")
 
             try:
@@ -309,6 +315,19 @@ class ConversationRedisStream:
                 for _, stream_messages in messages:
                     for stream_id, message in stream_messages:
                         current_id = stream_id
+                        raw = message.get(bytes(self._serializer.serialization_key, "utf-8"))
+                        if raw is not None and raw[:1] == b"\x80":
+                            # Skip a legacy pickle entry (pickle protocol >= 2 starts with 0x80) left in
+                            # an un-expired stream from before the JSON migration. current_id has already
+                            # advanced, so it isn't re-read. Genuinely-corrupt JSON is not skipped here —
+                            # it falls through to deserialize and fails the read as before.
+                            logger.warning(
+                                "Skipping legacy pickle conversation stream entry",
+                                stream_key=self._stream_key,
+                                stream_id=stream_id,
+                            )
+                            continue
+
                         data = self._serializer.deserialize(message)
 
                         latency = time.time() - data.timestamp
@@ -351,20 +370,25 @@ class ConversationRedisStream:
     async def mark_complete(self) -> None:
         await self._write_status(StatusPayload(status="complete"))
 
+    async def _xadd(self, message: dict[str, bytes]) -> None:
+        # XADD then EXPIRE in a single round-trip so the stream always carries a TTL. A bare
+        # EXPIRE before the first XADD is a no-op (the key doesn't exist yet), which left streams
+        # with no TTL and no self-expiry. Refreshing on each write also keeps an actively
+        # streaming conversation alive rather than expiring a fixed window after the first write.
+        pipe = self._redis_client.pipeline(transaction=False)
+        pipe.xadd(self._stream_key, message, maxlen=self._max_length, approximate=True)
+        pipe.expire(self._stream_key, self._timeout)
+        await pipe.execute()
+
     async def _write_status(self, status: StatusPayload) -> None:
         message = self._serializer.dumps(status)
         if message is None:
             return
-        await self._redis_client.xadd(
-            self._stream_key,
-            message,
-            maxlen=self._max_length,
-            approximate=True,
-        )
+        await self._xadd(message)
 
     async def write_to_stream(
         self,
-        generator: AsyncGenerator[AssistantOutput, None],
+        generator: AsyncGenerator[AssistantOutput],
         callback: Callable[[], None] | None = None,
         emit_completion: bool = True,
     ) -> None:
@@ -376,8 +400,6 @@ class ConversationRedisStream:
             emit_completion: Whether to mark the stream as complete
         """
         try:
-            await self._redis_client.expire(self._stream_key, self._timeout)
-
             last_iteration_time = None
             async for chunk in generator:
                 current_time = time.time()
@@ -388,12 +410,7 @@ class ConversationRedisStream:
 
                 message = self._serializer.dumps(chunk)
                 if message is not None:
-                    await self._redis_client.xadd(
-                        self._stream_key,
-                        message,
-                        maxlen=self._max_length,
-                        approximate=True,
-                    )
+                    await self._xadd(message)
                 if callback:
                     callback()
 
@@ -401,5 +418,11 @@ class ConversationRedisStream:
                 await self._write_status(StatusPayload(status="complete"))
 
         except Exception as e:
-            await self._write_status(StatusPayload(status="error", error=str(e)))
-            raise StreamError("Failed to write to stream")
+            # Best-effort error status back to the client. If Redis is itself the
+            # problem this write will fail too, so guard it so the secondary error
+            # can't mask the original one.
+            try:
+                await self._write_status(StatusPayload(status="error", error=str(e)))
+            except Exception:
+                logger.exception("Failed to write error status to stream", stream_key=self._stream_key)
+            raise StreamError("Failed to write to stream") from e

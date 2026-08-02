@@ -15,17 +15,23 @@ import {
     Link,
 } from '@posthog/lemon-ui'
 
+import { AccessControlAction } from 'lib/components/AccessControlAction'
 import { CopyToClipboardInline } from 'lib/components/CopyToClipboard'
 import { FlagSelector } from 'lib/components/FlagSelector'
 import { NotFound } from 'lib/components/NotFound'
 import { SceneFile } from 'lib/components/Scenes/SceneFile'
+import { SceneMenuBarFileItems } from 'lib/components/Scenes/SceneMenuBarFileItems'
 import { SceneMetalyticsSummaryButton } from 'lib/components/Scenes/SceneMetalyticsSummaryButton'
 import { SceneSelect } from 'lib/components/Scenes/SceneSelect'
+import { FEATURE_FLAGS } from 'lib/constants'
 import { useFileSystemLogView } from 'lib/hooks/useFileSystemLogView'
 import { LemonDialog } from 'lib/lemon-ui/LemonDialog'
 import { LemonField } from 'lib/lemon-ui/LemonField'
 import { LemonTabs } from 'lib/lemon-ui/LemonTabs'
+import { featureFlagLogic } from 'lib/logic/featureFlagLogic'
 import { ButtonPrimitive } from 'lib/ui/Button/ButtonPrimitives'
+import { MenuOpenIndicator } from 'lib/ui/Menus/Menus'
+import { getAccessControlDisabledReason } from 'lib/utils/accessControlUtils'
 import { JSONEditorInput } from 'scenes/feature-flags/JSONEditorInput'
 import { LinkedHogFunctions } from 'scenes/hog-functions/list/LinkedHogFunctions'
 import { PersonDisplay } from 'scenes/persons/PersonDisplay'
@@ -36,6 +42,12 @@ import { urls } from 'scenes/urls'
 
 import { SceneContent } from '~/layout/scenes/components/SceneContent'
 import { SceneDivider } from '~/layout/scenes/components/SceneDivider'
+import {
+    SceneMenuBar,
+    SceneMenuBarItem,
+    SceneMenuBarMenu,
+    SceneMenuBarSeparator,
+} from '~/layout/scenes/components/SceneMenuBar'
 import { SceneSection } from '~/layout/scenes/components/SceneSection'
 import { SceneTitleSection } from '~/layout/scenes/components/SceneTitleSection'
 import {
@@ -43,12 +55,15 @@ import {
     ScenePanelActionsSection,
     ScenePanelDivider,
     ScenePanelInfoSection,
+    ScenePanelLabel,
 } from '~/layout/scenes/SceneLayout'
 import { defaultDataTableColumns } from '~/queries/nodes/DataTable/utils'
 import { Query } from '~/queries/Query/Query'
 import { Node, NodeKind, ProductIntentContext, ProductKey, QuerySchema } from '~/queries/schema/schema-general'
 import { QueryContext } from '~/queries/types'
 import {
+    AccessControlLevel,
+    AccessControlResourceType,
     CyclotronJobFiltersType,
     EarlyAccessFeatureStage,
     EarlyAccessFeatureTabs,
@@ -60,6 +75,12 @@ import {
     RecordingUniversalFilters,
     ReplayTabs,
 } from '~/types'
+
+import {
+    AssigneeIconDisplay,
+    AssigneeLabelDisplay,
+} from 'products/error_tracking/frontend/components/Assignee/AssigneeDisplay'
+import { AssigneeSelect } from 'products/error_tracking/frontend/components/Assignee/AssigneeSelect'
 
 import { EarlyAccessFeatureLogicProps, earlyAccessFeatureLogic } from './earlyAccessFeatureLogic'
 import { InstructionsModal } from './InstructionsModal'
@@ -136,7 +157,6 @@ export function EarlyAccessFeature({ id }: EarlyAccessFeatureLogicProps): JSX.El
         originalEarlyAccessFeatureStage,
     } = useValues(earlyAccessFeatureLogic)
     const {
-        submitEarlyAccessFeatureRequest,
         loadEarlyAccessFeature,
         editFeature,
         updateStage,
@@ -145,15 +165,25 @@ export function EarlyAccessFeature({ id }: EarlyAccessFeatureLogicProps): JSX.El
         showGAPromotionConfirmation,
         saveEarlyAccessFeature,
         setEarlyAccessFeatureValue,
+        submitEarlyAccessFeature,
     } = useActions(earlyAccessFeatureLogic)
     const { currentTeamId } = useValues(teamLogic)
     const { canCopyToProject } = useValues(interProjectCopyLogic)
+    const { featureFlags } = useValues(featureFlagLogic)
+    const sceneMenuBarEnabled = !!featureFlags[FEATURE_FLAGS.SCENE_MENU_BAR]
 
     const isNewEarlyAccessFeature = id === 'new' || id === undefined
 
     // Determine if Save/Cancel buttons should be visible
     const wasOriginallyGA = originalEarlyAccessFeatureStage === EarlyAccessFeatureStage.GeneralAvailability
     const canShowSaveButtons = !wasOriginallyGA && (isNewEarlyAccessFeature || isEditingFeature)
+
+    const userAccessLevel = 'id' in earlyAccessFeature ? earlyAccessFeature.user_access_level : undefined
+    const accessControlDisabledReason = getAccessControlDisabledReason(
+        AccessControlResourceType.EarlyAccessFeature,
+        AccessControlLevel.Editor,
+        userAccessLevel
+    )
 
     const earlyAccessFeatureId =
         earlyAccessFeature && 'id' in earlyAccessFeature && earlyAccessFeature.id !== 'new'
@@ -197,13 +227,66 @@ export function EarlyAccessFeature({ id }: EarlyAccessFeatureLogicProps): JSX.El
     return (
         <Form id="early-access-feature" formKey="earlyAccessFeature" logic={earlyAccessFeatureLogic}>
             <SceneContent>
+                {sceneMenuBarEnabled && !isNewEarlyAccessFeature && (
+                    <SceneMenuBar>
+                        <SceneMenuBarMenu label="File" dataAttr={`${RESOURCE_TYPE}-menubar-file`}>
+                            <SceneMenuBarFileItems dataAttrKey={RESOURCE_TYPE} />
+                            {canCopyToProject && earlyAccessFeatureId && (
+                                <SceneMenuBarItem
+                                    onClick={() =>
+                                        router.actions.push(
+                                            urls.resourceTransfer('EarlyAccessFeature', earlyAccessFeatureId)
+                                        )
+                                    }
+                                    data-attr={`${RESOURCE_TYPE}-menubar-copy-to-project`}
+                                >
+                                    <IconCopy />
+                                    Copy to another project
+                                </SceneMenuBarItem>
+                            )}
+                            <SceneMenuBarSeparator />
+                            <SceneMenuBarItem
+                                variant="destructive"
+                                opensFloatingUi
+                                disabled={!!accessControlDisabledReason}
+                                tooltip={accessControlDisabledReason ?? undefined}
+                                onClick={() => {
+                                    LemonDialog.open({
+                                        title: 'Permanently delete feature?',
+                                        description:
+                                            'Doing so will remove any opt in conditions from the feature flag.',
+                                        primaryButton: {
+                                            children: 'Delete',
+                                            type: 'primary',
+                                            status: 'danger',
+                                            'data-attr': 'confirm-delete-feature',
+                                            onClick: () => {
+                                                deleteEarlyAccessFeature(
+                                                    (earlyAccessFeature as EarlyAccessFeatureType)?.id
+                                                )
+                                            },
+                                        },
+                                        secondaryButton: {
+                                            children: 'Close',
+                                            type: 'secondary',
+                                        },
+                                    })
+                                }}
+                                data-attr={`${RESOURCE_TYPE}-menubar-delete`}
+                            >
+                                <IconTrash />
+                                Delete
+                            </SceneMenuBarItem>
+                        </SceneMenuBarMenu>
+                    </SceneMenuBar>
+                )}
                 <SceneTitleSection
                     name={earlyAccessFeature.name}
                     description={earlyAccessFeature.description}
                     resourceType={{
                         type: 'early_access_feature',
                     }}
-                    canEdit={isNewEarlyAccessFeature || isEditingFeature}
+                    canEdit={(isNewEarlyAccessFeature || isEditingFeature) && !accessControlDisabledReason}
                     onNameChange={(name) => {
                         setEarlyAccessFeatureValue('name', name)
                     }}
@@ -232,33 +315,21 @@ export function EarlyAccessFeature({ id }: EarlyAccessFeatureLogicProps): JSX.El
                                         >
                                             Cancel
                                         </LemonButton>
-                                        <LemonButton
-                                            type="primary"
-                                            htmlType="submit"
-                                            data-attr="save-feature"
-                                            onClick={() => {
-                                                // Check if user is promoting to General Availability
-                                                const isPromotingToGA =
-                                                    earlyAccessFeature.stage ===
-                                                    EarlyAccessFeatureStage.GeneralAvailability
-
-                                                if (isPromotingToGA) {
-                                                    showGAPromotionConfirmation((rolloutToAll: boolean) =>
-                                                        submitEarlyAccessFeatureRequest({
-                                                            ...earlyAccessFeature,
-                                                            ...(rolloutToAll ? { rollout_to_all: true } : {}),
-                                                        })
-                                                    )
-                                                } else {
-                                                    submitEarlyAccessFeatureRequest(earlyAccessFeature)
-                                                }
-                                            }}
-                                            loading={isEarlyAccessFeatureSubmitting}
-                                            form="early-access-feature"
-                                            size="small"
+                                        <AccessControlAction
+                                            resourceType={AccessControlResourceType.EarlyAccessFeature}
+                                            minAccessLevel={AccessControlLevel.Editor}
+                                            userAccessLevel={userAccessLevel}
                                         >
-                                            {isNewEarlyAccessFeature ? 'Save as draft' : 'Save'}
-                                        </LemonButton>
+                                            <LemonButton
+                                                type="primary"
+                                                onClick={submitEarlyAccessFeature}
+                                                data-attr="save-feature"
+                                                loading={isEarlyAccessFeatureSubmitting}
+                                                size="small"
+                                            >
+                                                {isNewEarlyAccessFeature ? 'Save as draft' : 'Save'}
+                                            </LemonButton>
+                                        </AccessControlAction>
                                     </>
                                 ) : (
                                     <>
@@ -302,25 +373,35 @@ export function EarlyAccessFeature({ id }: EarlyAccessFeatureLogicProps): JSX.El
                                                     },
                                                 ]}
                                             >
+                                                {/* The trigger must stay the direct child of LemonMenu — it
+                                                    clones the trigger to inject the menu-toggle onClick, which an
+                                                    AccessControlAction wrapper would swallow. Gate via disabledReason. */}
                                                 <LemonButton
                                                     tooltip="Publish this feature to make it available"
                                                     type="primary"
                                                     size="small"
+                                                    disabledReason={accessControlDisabledReason ?? undefined}
                                                 >
                                                     Release
                                                 </LemonButton>
                                             </LemonMenu>
                                         )}
                                         {earlyAccessFeature.stage != EarlyAccessFeatureStage.GeneralAvailability && (
-                                            <LemonButton
-                                                type="secondary"
-                                                onClick={() => editFeature(true)}
-                                                loading={false}
-                                                data-attr="edit-feature"
-                                                size="small"
+                                            <AccessControlAction
+                                                resourceType={AccessControlResourceType.EarlyAccessFeature}
+                                                minAccessLevel={AccessControlLevel.Editor}
+                                                userAccessLevel={userAccessLevel}
                                             >
-                                                Edit
-                                            </LemonButton>
+                                                <LemonButton
+                                                    type="secondary"
+                                                    onClick={() => editFeature(true)}
+                                                    loading={false}
+                                                    data-attr="edit-feature"
+                                                    size="small"
+                                                >
+                                                    Edit
+                                                </LemonButton>
+                                            </AccessControlAction>
                                         )}
                                     </>
                                 )
@@ -354,6 +435,8 @@ export function EarlyAccessFeature({ id }: EarlyAccessFeatureLogicProps): JSX.El
                             value={earlyAccessFeature.stage}
                             name="stage"
                             dataAttrKey={RESOURCE_TYPE}
+                            canEdit={!accessControlDisabledReason}
+                            buttonProps={{ tooltip: accessControlDisabledReason ?? undefined }}
                             options={[
                                 {
                                     label: 'Draft (default)',
@@ -378,6 +461,36 @@ export function EarlyAccessFeature({ id }: EarlyAccessFeatureLogicProps): JSX.El
                                 },
                             ]}
                         />
+                        {!isNewEarlyAccessFeature && (
+                            <ScenePanelLabel title="Assignee">
+                                <AssigneeSelect
+                                    assignee={earlyAccessFeature.assignee ?? null}
+                                    onChange={(assignee) => {
+                                        if (isEditingFeature) {
+                                            setEarlyAccessFeatureValue('assignee', assignee)
+                                        } else {
+                                            saveEarlyAccessFeature({ ...earlyAccessFeature, assignee })
+                                        }
+                                    }}
+                                    fullWidth
+                                >
+                                    {(displayAssignee, isOpen) => (
+                                        <ButtonPrimitive
+                                            fullWidth
+                                            variant="panel"
+                                            disabled={!!accessControlDisabledReason}
+                                            tooltip={accessControlDisabledReason ?? undefined}
+                                            data-state={isOpen ? 'open' : 'closed'}
+                                            data-attr={`${RESOURCE_TYPE}-assignee`}
+                                        >
+                                            <AssigneeIconDisplay assignee={displayAssignee} size="small" />
+                                            <AssigneeLabelDisplay assignee={displayAssignee} size="small" />
+                                            <MenuOpenIndicator className="ml-auto" />
+                                        </ButtonPrimitive>
+                                    )}
+                                </AssigneeSelect>
+                            </ScenePanelLabel>
+                        )}
                         <SceneFile dataAttrKey={RESOURCE_TYPE} />
                         <Link
                             to="https://posthog.com/docs/feature-flags/early-access-feature-management"
@@ -431,6 +544,8 @@ export function EarlyAccessFeature({ id }: EarlyAccessFeatureLogicProps): JSX.El
                             }}
                             variant="danger"
                             menuItem
+                            disabled={!!accessControlDisabledReason}
+                            tooltip={accessControlDisabledReason ?? undefined}
                             data-attr={`${RESOURCE_TYPE}-delete`}
                         >
                             <IconTrash />
@@ -810,6 +925,7 @@ function PersonsTableByFilter({ recordingsFilters, properties }: PersonsTableByF
                                     person={{ id: person.id }}
                                     displayName={person.display_name}
                                     noPopover
+                                    withComposeTicketButton
                                 />
                             </CopyToClipboardInline>
                         )

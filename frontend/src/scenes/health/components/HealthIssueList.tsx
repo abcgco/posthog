@@ -14,7 +14,7 @@ import { HealthIssueCard } from './HealthIssueCard'
 
 export const HealthIssueList = (): JSX.Element => {
     const { issues, healthIssuesLoading, healthIssues } = useValues(healthSceneLogic)
-    const { dismissIssue, undismissIssue } = useActions(healthSceneLogic)
+    const { dismissIssue, undismissIssue, loadHealthIssues } = useActions(healthSceneLogic)
 
     if (healthIssuesLoading && !healthIssues) {
         return (
@@ -28,7 +28,9 @@ export const HealthIssueList = (): JSX.Element => {
 
     if (!healthIssuesLoading && healthIssues === null) {
         return (
-            <LemonBanner type="warning">Error loading health information. Please try refreshing the page.</LemonBanner>
+            <LemonBanner type="warning" action={{ children: 'Retry', onClick: () => loadHealthIssues() }}>
+                We couldn't load your health information. This is usually temporary — retry to try again.
+            </LemonBanner>
         )
     }
 
@@ -53,7 +55,7 @@ export const HealthIssueList = (): JSX.Element => {
     const populatedCategories = CATEGORY_ORDER.filter((cat) => groupedByCategory[cat])
 
     return (
-        <div className="flex flex-col gap-4 max-w-3xl">
+        <div className="flex flex-col gap-4">
             {populatedCategories.map((category) => {
                 const categoryIssues = groupedByCategory[category]!
                 const config = HEALTH_CATEGORY_CONFIG[category]

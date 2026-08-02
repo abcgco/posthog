@@ -1,7 +1,7 @@
 import { Placement } from '@floating-ui/react'
 import clsx from 'clsx'
 import { useActions, useValues } from 'kea'
-import { forwardRef, useRef, useState } from 'react'
+import { forwardRef, useEffect, useRef, useState } from 'react'
 
 import { IconCalendar, IconInfo } from '@posthog/icons'
 import { LemonButton, LemonButtonProps, LemonDivider, LemonSwitch, Popover } from '@posthog/lemon-ui'
@@ -13,28 +13,33 @@ import {
     DateFilterView,
     NO_OVERRIDE_RANGE_PLACEHOLDER,
 } from 'lib/components/DateFilter/types'
+import { ScrollableShadows } from 'lib/components/ScrollableShadows/ScrollableShadows'
 import { dayjs } from 'lib/dayjs'
 import { LemonCalendarSelect, LemonCalendarSelectProps } from 'lib/lemon-ui/LemonCalendar/LemonCalendarSelect'
 import { LemonCalendarRange } from 'lib/lemon-ui/LemonCalendarRange/LemonCalendarRange'
 import { Tooltip } from 'lib/lemon-ui/Tooltip'
-import { dateFilterToText, dateMapping, uuid } from 'lib/utils'
-import { formatResolvedDateRange } from 'lib/utils/dateTimeUtils'
+import { dateFilterToText, dateMapping } from 'lib/utils/dateFilters'
+import { formatResolvedDateRange } from 'lib/utils/datetime'
+import { uuid } from 'lib/utils/dom'
 import { teamLogic } from 'scenes/teamLogic'
 
 import { ResolvedDateRangeResponse } from '~/queries/schema/schema-general'
 import { DateMappingOption, PropertyOperator } from '~/types'
 
 import { PropertyFilterDatePicker } from '../PropertyFilters/components/PropertyFilterDatePicker'
+import type { DateFilterExclusions } from './DateFilterExclusionsControl'
 import { dateFilterLogic } from './dateFilterLogic'
 import { FixedRangeWithTimePicker } from './FixedRangeWithTimePicker'
 import { JumpToTimestampPicker } from './JumpToTimestampPicker'
+import { LemonDateFilterExclusions } from './LemonDateFilterExclusions'
+import { RelativeDateRangeSelector } from './RelativeDateRangeSelector'
 import { RollingDateRangeFilter } from './RollingDateRangeFilter'
 import { DateOption } from './rollingDateRangeFilterLogic'
 
 export interface DateFilterProps {
     showCustom?: boolean
     showRollingRangePicker?: boolean
-    makeLabel?: (key: React.ReactNode, startOfRange?: React.ReactNode) => React.ReactNode
+    makeLabel?: (key: React.ReactNode, startOfRange?: React.ReactNode, endOfRange?: React.ReactNode) => React.ReactNode
     className?: string
     onChange?: (fromDate: string | null, toDate: string | null, explicitDate?: boolean) => void
     disabled?: boolean
@@ -50,6 +55,16 @@ export interface DateFilterProps {
     fullWidth?: boolean
     resolvedDateRange?: ResolvedDateRangeResponse
     showJumpToTimestamp?: boolean
+    showCustomRelativeRange?: boolean
+    /**
+     * When true, surfaces every option — presets, rolling picker, "Custom date…" (single exact),
+     * "Custom fixed date range…", and "Custom relative range…" — in one flat list. Callers opt
+     * in to let the user freely pick either a single value or a range. `isFixedDateMode` and
+     * `showCustomRelativeRange` are ignored when this is set.
+     */
+    allowSingleAndRange?: boolean
+    /** Called when the dropdown opens (true) or closes (false). Used for interaction analytics. */
+    onOpenChange?: (open: boolean) => void
 }
 
 interface RawDateFilterProps extends DateFilterProps {
@@ -69,6 +84,11 @@ interface RawDateFilterProps extends DateFilterProps {
     use24HourFormat?: boolean
     explicitDate?: boolean
     showExplicitDateToggle?: boolean
+    exclusions?: DateFilterExclusions
+    onExclusionsChange?: (exclusions: DateFilterExclusions) => void
+    showIncompletePeriodExclusion?: boolean
+    showDaysOfWeekExclusions?: boolean
+    optionsSize?: 'small' | 'medium'
 }
 
 export const DateFilter = forwardRef<HTMLButtonElement, RawDateFilterProps>(function DateFilter(
@@ -97,11 +117,20 @@ export const DateFilter = forwardRef<HTMLButtonElement, RawDateFilterProps>(func
         use24HourFormat = false,
         explicitDate,
         showExplicitDateToggle = false,
+        exclusions,
+        onExclusionsChange,
+        showIncompletePeriodExclusion = false,
+        showDaysOfWeekExclusions = false,
+        optionsSize,
         resolvedDateRange,
         showJumpToTimestamp = false,
+        showCustomRelativeRange = false,
+        allowSingleAndRange = false,
+        onOpenChange,
     },
     ref
 ) {
+    const effectiveShowCustomRelativeRange = allowSingleAndRange ? true : showCustomRelativeRange
     const key = useRef(uuid()).current
     const logicProps: DateFilterLogicProps = {
         key,
@@ -114,6 +143,8 @@ export const DateFilter = forwardRef<HTMLButtonElement, RawDateFilterProps>(func
         placeholder,
         allowTimePrecision,
         explicitDate,
+        showCustomRelativeRange: effectiveShowCustomRelativeRange,
+        allowSingleAndRange,
     }
     const {
         open,
@@ -121,6 +152,7 @@ export const DateFilter = forwardRef<HTMLButtonElement, RawDateFilterProps>(func
         openDateToNow,
         openFixedDate,
         openJumpToTimestamp,
+        openCustomRelativeRange,
         close,
         setRangeDateFrom,
         setExplicitDate,
@@ -139,9 +171,24 @@ export const DateFilter = forwardRef<HTMLButtonElement, RawDateFilterProps>(func
         isDateToNow,
         isFixedDate,
         isRollingDateRange,
+        isCustomRelativeRange,
         dateFromHasTimePrecision,
         fixedRangeGranularity,
     } = useValues(dateFilterLogic(logicProps))
+
+    // Hold the callback in a ref so the visibility effect below depends only on `isVisible` —
+    // callers pass an inline function, which would otherwise re-run the effect every render.
+    const onOpenChangeRef = useRef(onOpenChange)
+    useEffect(() => {
+        onOpenChangeRef.current = onOpenChange
+    })
+    const wasVisibleRef = useRef(isVisible)
+    useEffect(() => {
+        if (isVisible !== wasVisibleRef.current) {
+            wasVisibleRef.current = isVisible
+            onOpenChangeRef.current?.(isVisible)
+        }
+    }, [isVisible])
 
     const { weekStartDay } = useValues(teamLogic)
     const optionsRef = useRef<HTMLDivElement | null>(null)
@@ -151,10 +198,12 @@ export const DateFilter = forwardRef<HTMLButtonElement, RawDateFilterProps>(func
     )
 
     const showFixedRangeTimeToggle = allowTimePrecision || allowFixedRangeWithTime
+    const showExclusions =
+        (showIncompletePeriodExclusion || showDaysOfWeekExclusions) && !!exclusions && !!onExclusionsChange
 
     const popoverOverlay =
         view === DateFilterView.FixedRange ? (
-            fixedRangeGranularity === 'minute' ? (
+            showFixedRangeTimeToggle && fixedRangeGranularity === 'minute' ? (
                 <FixedRangeWithTimePicker
                     rangeDateFrom={rangeDateFrom}
                     rangeDateTo={rangeDateTo}
@@ -207,102 +256,151 @@ export const DateFilter = forwardRef<HTMLButtonElement, RawDateFilterProps>(func
         ) : view === DateFilterView.FixedDate ? (
             <PropertyFilterDatePicker
                 autoFocus
-                operator={PropertyOperator.Exact}
+                // IsDateExact (rather than Exact) so PropertyFilterDatePicker's auto-open gate
+                // — `operator && isOperatorDate(operator) && autoFocus` — opens the calendar
+                // immediately instead of waiting for a click on the input.
+                operator={PropertyOperator.IsDateExact}
                 value={rangeDateFrom ? rangeDateFrom.toString() : dayjs().toString()}
                 setValue={(date) => {
-                    setDate(String(date), '')
+                    setDate(String(date), null)
                 }}
             />
         ) : view === DateFilterView.JumpToTimestamp ? (
             <JumpToTimestampPicker onApply={(dateFrom, dateTo) => setDate(dateFrom, dateTo)} onClose={open} />
+        ) : view === DateFilterView.CustomRelativeRange ? (
+            <RelativeDateRangeSelector
+                onApply={(from, to) => setDate(from, to)}
+                onClose={open}
+                initialFrom={typeof dateFrom === 'string' ? dateFrom : null}
+                initialTo={typeof dateTo === 'string' ? dateTo : null}
+            />
         ) : (
-            <div className="deprecated-space-y-px" ref={optionsRef} onClick={(e) => e.stopPropagation()}>
-                {dateOptions.map(({ key, values, inactive }) => {
-                    if (key === CUSTOM_OPTION_KEY && !showCustom) {
-                        return null
-                    }
-
-                    if (inactive && label !== key) {
-                        return null
-                    }
-
-                    const isActive =
-                        (dateFrom ?? null) === (values[0] ?? null) && (dateTo ?? null) === (values[1] ?? null)
-                    const dateValue = dateFilterToText(
-                        values[0],
-                        values[1],
-                        CUSTOM_OPTION_DESCRIPTION,
-                        dateOptions,
-                        isDateFormatted,
-                        undefined,
-                        undefined,
-                        weekStartDay
-                    )
-                    const startOfRangeDateValue = dateFilterToText(
-                        values[0],
-                        undefined,
-                        '',
-                        [],
-                        false,
-                        'MMMM D, YYYY',
-                        true
-                    )
-
-                    return (
-                        <Tooltip key={key} title={makeLabel ? makeLabel(dateValue, startOfRangeDateValue) : undefined}>
-                            <LemonButton
-                                key={key}
-                                data-attr={`date-filter-${key.toLowerCase().replace(/\s+/g, '-')}`}
-                                onClick={() => setDate(values[0] || null, values[1] || null, false, explicitDate)}
-                                active={isActive}
-                                fullWidth
-                            >
-                                {key === CUSTOM_OPTION_KEY ? NO_OVERRIDE_RANGE_PLACEHOLDER : key}
-                            </LemonButton>
-                        </Tooltip>
-                    )
-                })}
-                {showRollingRangePicker && (
-                    <RollingDateRangeFilter
-                        pageKey={key}
-                        dateFrom={dateFrom}
-                        dateRangeFilterLabel={isFixedDateMode ? 'Last' : undefined}
-                        selected={isRollingDateRange}
-                        onChange={(fromDate) => {
-                            setDate(fromDate, '', true, explicitDate)
-                        }}
-                        makeLabel={makeLabel}
-                        popover={{
-                            ref: rollingDateRangeRef,
-                        }}
-                        max={max}
-                        allowedDateOptions={
-                            isFixedDateMode && !allowedRollingDateOptions
-                                ? ['hours', 'days', 'weeks', 'months', 'years']
-                                : allowedRollingDateOptions
+            <div className="flex max-h-full min-h-0 flex-col" ref={optionsRef} onClick={(e) => e.stopPropagation()}>
+                <ScrollableShadows
+                    direction="vertical"
+                    hideScrollbars
+                    // max-h-80 shows ~9 preset rows with a sliver of the tenth as a scroll hint
+                    className={clsx('min-h-0 flex-1 border-b', optionsSize === 'small' && 'max-h-80')}
+                    innerClassName="deprecated-space-y-px p-1"
+                >
+                    {dateOptions.map(({ key, values, inactive }) => {
+                        if (key === CUSTOM_OPTION_KEY && !showCustom) {
+                            return null
                         }
-                        fullWidth
-                    />
-                )}
-                <LemonDivider />
-                {isFixedDateMode ? (
-                    <LemonButton onClick={openFixedDate} active={isFixedDate} fullWidth>
-                        Custom date...
-                    </LemonButton>
-                ) : (
-                    <>
-                        <LemonButton onClick={openDateToNow} active={isDateToNow} fullWidth>
-                            From custom date until now…
+
+                        if (inactive && label !== key) {
+                            return null
+                        }
+
+                        const isActive =
+                            (dateFrom ?? null) === (values[0] ?? null) && (dateTo ?? null) === (values[1] ?? null)
+                        const dateValue = dateFilterToText(
+                            values[0],
+                            values[1],
+                            CUSTOM_OPTION_DESCRIPTION,
+                            dateOptions,
+                            isDateFormatted,
+                            undefined,
+                            undefined,
+                            weekStartDay
+                        )
+                        const startOfRangeDateValue = dateFilterToText(
+                            values[0],
+                            undefined,
+                            '',
+                            [],
+                            false,
+                            'MMMM D, YYYY',
+                            true
+                        )
+                        const endOfRangeDateValue = values[1]
+                            ? dateFilterToText(values[1], undefined, '', [], false, 'MMMM D, YYYY', true)
+                            : undefined
+
+                        return (
+                            <Tooltip
+                                key={key}
+                                title={
+                                    makeLabel
+                                        ? makeLabel(dateValue, startOfRangeDateValue, endOfRangeDateValue)
+                                        : undefined
+                                }
+                            >
+                                <LemonButton
+                                    key={key}
+                                    data-attr={`date-filter-${key.toLowerCase().replace(/\s+/g, '-')}`}
+                                    onClick={() => setDate(values[0] || null, values[1] || null, false, explicitDate)}
+                                    active={isActive}
+                                    size={optionsSize}
+                                    fullWidth
+                                >
+                                    {key === CUSTOM_OPTION_KEY ? NO_OVERRIDE_RANGE_PLACEHOLDER : key}
+                                </LemonButton>
+                            </Tooltip>
+                        )
+                    })}
+                    {showRollingRangePicker && (
+                        <RollingDateRangeFilter
+                            pageKey={key}
+                            size={optionsSize}
+                            dateFrom={dateFrom}
+                            dateRangeFilterLabel={isFixedDateMode ? 'Last' : undefined}
+                            selected={isRollingDateRange}
+                            onChange={(fromDate) => {
+                                setDate(fromDate, '', true, explicitDate)
+                            }}
+                            makeLabel={makeLabel}
+                            popover={{
+                                ref: rollingDateRangeRef,
+                            }}
+                            max={max}
+                            allowedDateOptions={
+                                isFixedDateMode && !allowedRollingDateOptions
+                                    ? ['hours', 'days', 'weeks', 'months', 'years']
+                                    : allowedRollingDateOptions
+                            }
+                            fullWidth
+                        />
+                    )}
+                </ScrollableShadows>
+                <div className="shrink-0 deprecated-space-y-px p-1">
+                    {(isFixedDateMode || allowSingleAndRange) && (
+                        <LemonButton onClick={openFixedDate} active={isFixedDate} size={optionsSize} fullWidth>
+                            Custom date...
                         </LemonButton>
-                        <LemonButton onClick={openFixedRange} active={isFixedRange} fullWidth>
-                            Custom fixed date range…
-                        </LemonButton>
-                    </>
-                )}
-                {showExplicitDateToggle && (
-                    <>
-                        <LemonDivider />
-                        <div className="LemonSwitch pb-2 pt-2 LemonSwitch--medium LemonSwitch--full-width">
+                    )}
+                    {(!isFixedDateMode || allowSingleAndRange) && (
+                        <>
+                            {!allowSingleAndRange && (
+                                <LemonButton onClick={openDateToNow} active={isDateToNow} size={optionsSize} fullWidth>
+                                    From custom date until now…
+                                </LemonButton>
+                            )}
+                            <LemonButton onClick={openFixedRange} active={isFixedRange} size={optionsSize} fullWidth>
+                                Custom fixed date range…
+                            </LemonButton>
+                            {effectiveShowCustomRelativeRange && (
+                                <LemonButton
+                                    onClick={openCustomRelativeRange}
+                                    active={isCustomRelativeRange}
+                                    size={optionsSize}
+                                    fullWidth
+                                >
+                                    Custom relative range…
+                                </LemonButton>
+                            )}
+                        </>
+                    )}
+                    {(showExplicitDateToggle || showExclusions) && <LemonDivider />}
+                    {showExplicitDateToggle && (
+                        <div
+                            className={clsx(
+                                // Deliberately medium at every optionsSize: LemonButton--small keeps the default
+                                // 14px font, while LemonSwitch--small would drop the label to 12px
+                                'LemonSwitch LemonSwitch--full-width LemonSwitch--medium',
+                                optionsSize === 'small' ? 'pb-1 pt-1' : 'pb-2 pt-2'
+                            )}
+                        >
                             <label className="flex items-center gap-1">
                                 <span>Exact time range</span>
                                 <Tooltip
@@ -327,16 +425,30 @@ export const DateFilter = forwardRef<HTMLButtonElement, RawDateFilterProps>(func
                                 }}
                             />
                         </div>
-                    </>
-                )}
-                {showJumpToTimestamp && (
-                    <>
-                        <LemonDivider />
-                        <LemonButton onClick={openJumpToTimestamp} fullWidth data-attr="jump-to-timestamp-option">
-                            Jump to timestamp…
-                        </LemonButton>
-                    </>
-                )}
+                    )}
+                    {showExclusions && (
+                        <LemonDateFilterExclusions
+                            exclusions={exclusions}
+                            onChange={onExclusionsChange}
+                            showDays={showDaysOfWeekExclusions}
+                            showIncomplete={showIncompletePeriodExclusion}
+                            size={optionsSize}
+                        />
+                    )}
+                    {showJumpToTimestamp && (
+                        <>
+                            <LemonDivider />
+                            <LemonButton
+                                onClick={openJumpToTimestamp}
+                                size={optionsSize}
+                                fullWidth
+                                data-attr="jump-to-timestamp-option"
+                            >
+                                Jump to timestamp…
+                            </LemonButton>
+                        </>
+                    )}
+                </div>
             </div>
         )
 
@@ -349,6 +461,7 @@ export const DateFilter = forwardRef<HTMLButtonElement, RawDateFilterProps>(func
             additionalRefs={[rollingDateRangeRef]}
             onClickOutside={close}
             closeParentPopoverOnClickInside={false}
+            overflowHidden={view === DateFilterView.QuickList}
         >
             <LemonButton
                 ref={ref}

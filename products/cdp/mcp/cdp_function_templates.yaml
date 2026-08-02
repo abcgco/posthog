@@ -6,7 +6,7 @@
 # All other fields (title, description, enrich_url, etc.) are yours to configure.
 category: Function templates
 feature: hog_function_templates
-url_prefix: /pipeline/templates
+url_prefix: /pipeline/new
 ui_apps: {}
 tools:
     cdp-function-templates-list:
@@ -25,6 +25,17 @@ tools:
             (Slack, webhooks, email, etc.) and transformations (GeoIP, etc.). Filter by type (destination,
             site_destination, site_app, transformation, etc.) via the 'type' query parameter. Results are sorted by
             popularity (number of active functions using each template).
+        response:
+            include:
+                - id
+                - name
+                - description
+                - type
+                - status
+                - category
+                - free
+                - icon_url
+                - code_language
     cdp-function-templates-retrieve:
         operation: hog_function_templates_retrieve
         enabled: true

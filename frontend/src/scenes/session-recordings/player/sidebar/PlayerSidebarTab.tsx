@@ -8,7 +8,7 @@ import { SessionRecordingSidebarTab } from '~/types'
 import { PlayerSidebarLinkedIssuesTab } from './PlayerSidebarLinkedIssuesTab'
 import { playerSidebarLogic } from './playerSidebarLogic'
 import { PlayerSidebarOverviewTab } from './PlayerSidebarOverviewTab'
-import { PlayerSidebarSessionSummaryTab } from './PlayerSidebarSessionSummaryTab'
+import { PlayerSidebarPersonRecordingsTab } from './PlayerSidebarPersonRecordingsTab'
 
 export function PlayerSidebarTab(): JSX.Element | null {
     const { activeTab } = useValues(playerSidebarLogic)
@@ -20,10 +20,10 @@ export function PlayerSidebarTab(): JSX.Element | null {
             return <PlayerInspector />
         case SessionRecordingSidebarTab.NETWORK_WATERFALL:
             return <NetworkView />
-        case SessionRecordingSidebarTab.SESSION_SUMMARY:
-            return <PlayerSidebarSessionSummaryTab />
         case SessionRecordingSidebarTab.LINKED_ISSUES:
             return <PlayerSidebarLinkedIssuesTab />
+        case SessionRecordingSidebarTab.SESSIONS:
+            return <PlayerSidebarPersonRecordingsTab />
         default:
             return null
     }

@@ -1,10 +1,13 @@
+use std::str::from_utf8;
+
 use assignment_coordination::store::EtcdStore;
-use etcd_client::{Compare, CompareOp, PutOptions, Txn, TxnOp, WatchStream};
+use etcd_client::{Compare, CompareOp, DeleteOptions, PutOptions, Txn, TxnOp, WatchStream};
 
 use crate::error::{Error, Result};
 use crate::types::{
-    AssignmentStatus, HandoffState, LeaderInfo, PartitionAssignment, PodStatus, RegisteredPod,
-    RegisteredRouter, RouterCutoverAck,
+    AssignmentPrecondition, AssignmentStatus, HandoffReplacement, HandoffState, LeaderInfo,
+    PartitionAssignment, PodDrainedAck, PodStatus, PodWarmedAck, RegisteredPod, RegisteredRouter,
+    RouterFreezeAck,
 };
 
 /// All etcd key patterns used by the PersonHog store.
@@ -17,9 +20,18 @@ enum StoreKey<'a> {
     AssignmentsPrefix,
     Handoff(u32),
     HandoffsPrefix,
-    HandoffAck { partition: u32, router: &'a str },
-    HandoffAcksForPartition(u32),
-    HandoffAcksPrefix,
+    // Freeze acks: each router writes one when it has begun stashing for a partition.
+    FreezeAck { partition: u32, router: &'a str },
+    FreezeAcksForPartition(u32),
+    FreezeAcksPrefix,
+    // Drained acks: the old owner writes one when all inflight handlers have completed.
+    DrainedAck { partition: u32, pod: &'a str },
+    DrainedAcksForPartition(u32),
+    DrainedAcksPrefix,
+    // Warmed acks: the new owner writes one after consuming Kafka up to the stable HWM.
+    WarmedAck { partition: u32, pod: &'a str },
+    WarmedAcksForPartition(u32),
+    WarmedAcksPrefix,
     Leader,
     Generation,
     TotalPartitions,
@@ -36,11 +48,21 @@ impl StoreKey<'_> {
             StoreKey::AssignmentsPrefix => format!("{prefix}assignments/"),
             StoreKey::Handoff(p) => format!("{prefix}handoffs/{p}"),
             StoreKey::HandoffsPrefix => format!("{prefix}handoffs/"),
-            StoreKey::HandoffAck { partition, router } => {
-                format!("{prefix}handoff_acks/{partition}/{router}")
+            StoreKey::FreezeAck { partition, router } => {
+                format!("{prefix}freeze_acks/{partition}/{router}")
             }
-            StoreKey::HandoffAcksForPartition(p) => format!("{prefix}handoff_acks/{p}/"),
-            StoreKey::HandoffAcksPrefix => format!("{prefix}handoff_acks/"),
+            StoreKey::FreezeAcksForPartition(p) => format!("{prefix}freeze_acks/{p}/"),
+            StoreKey::FreezeAcksPrefix => format!("{prefix}freeze_acks/"),
+            StoreKey::DrainedAck { partition, pod } => {
+                format!("{prefix}drained_acks/{partition}/{pod}")
+            }
+            StoreKey::DrainedAcksForPartition(p) => format!("{prefix}drained_acks/{p}/"),
+            StoreKey::DrainedAcksPrefix => format!("{prefix}drained_acks/"),
+            StoreKey::WarmedAck { partition, pod } => {
+                format!("{prefix}warmed_acks/{partition}/{pod}")
+            }
+            StoreKey::WarmedAcksForPartition(p) => format!("{prefix}warmed_acks/{p}/"),
+            StoreKey::WarmedAcksPrefix => format!("{prefix}warmed_acks/"),
             StoreKey::Leader => format!("{prefix}coordinator/leader"),
             StoreKey::Generation => format!("{prefix}generation"),
             StoreKey::TotalPartitions => format!("{prefix}config/total_partitions"),
@@ -92,6 +114,13 @@ impl PersonhogStore {
         Ok(self.inner.list(&key).await?)
     }
 
+    /// List pods along with the etcd revision of the snapshot, so a watch
+    /// can be anchored strictly after it.
+    pub async fn list_pods_with_revision(&self) -> Result<(Vec<RegisteredPod>, i64)> {
+        let key = self.key(StoreKey::PodsPrefix);
+        Ok(self.inner.list_with_revision(&key).await?)
+    }
+
     pub async fn update_pod_status(
         &self,
         pod_name: &str,
@@ -113,6 +142,19 @@ impl PersonhogStore {
         Ok(self.inner.watch(&key).await?)
     }
 
+    /// Watch pod registrations from an explicit revision (inclusive),
+    /// replaying events since that revision even if they predate the
+    /// watch's creation.
+    pub async fn watch_pods_from(&self, start_revision: i64) -> Result<WatchStream> {
+        let key = self.key(StoreKey::PodsPrefix);
+        Ok(self.inner.watch_from(&key, start_revision).await?)
+    }
+
+    /// The current etcd store revision, for anchoring watches.
+    pub async fn current_revision(&self) -> Result<i64> {
+        Ok(self.inner.current_revision().await?)
+    }
+
     // ── Router operations ────────────────────────────────────────
 
     pub async fn register_router(&self, router: &RegisteredRouter, lease_id: i64) -> Result<()> {
@@ -130,6 +172,11 @@ impl PersonhogStore {
         Ok(self.inner.watch(&key).await?)
     }
 
+    pub async fn watch_routers_from(&self, start_revision: i64) -> Result<WatchStream> {
+        let key = self.key(StoreKey::RoutersPrefix);
+        Ok(self.inner.watch_from(&key, start_revision).await?)
+    }
+
     // ── Assignment operations ───────────────────────────────────
 
     pub async fn get_assignment(&self, partition: u32) -> Result<Option<PartitionAssignment>> {
@@ -140,6 +187,23 @@ impl PersonhogStore {
     pub async fn list_assignments(&self) -> Result<Vec<PartitionAssignment>> {
         let key = self.key(StoreKey::AssignmentsPrefix);
         Ok(self.inner.list(&key).await?)
+    }
+
+    /// Like `list_assignments`, but also returns the etcd revision of the
+    /// snapshot, for gap-free snapshot-then-watch handshakes.
+    pub async fn list_assignments_with_revision(&self) -> Result<(Vec<PartitionAssignment>, i64)> {
+        let key = self.key(StoreKey::AssignmentsPrefix);
+        Ok(self.inner.list_with_revision(&key).await?)
+    }
+
+    /// Like `list_assignments`, but pairs each record with its key's
+    /// `mod_revision` so a plan can assert, at apply time, that the
+    /// assignments it read are unchanged (`AssignmentPrecondition`).
+    pub async fn list_assignments_with_mod_revisions(
+        &self,
+    ) -> Result<Vec<(PartitionAssignment, i64)>> {
+        let key = self.key(StoreKey::AssignmentsPrefix);
+        Ok(self.inner.list_with_mod_revisions(&key).await?)
     }
 
     pub async fn put_assignments(&self, assignments: &[PartitionAssignment]) -> Result<()> {
@@ -159,11 +223,6 @@ impl PersonhogStore {
         Ok(())
     }
 
-    pub async fn watch_assignments(&self) -> Result<WatchStream> {
-        let key = self.key(StoreKey::AssignmentsPrefix);
-        Ok(self.inner.watch(&key).await?)
-    }
-
     // ── Handoff operations ──────────────────────────────────────
 
     pub async fn get_handoff(&self, partition: u32) -> Result<Option<HandoffState>> {
@@ -176,9 +235,121 @@ impl PersonhogStore {
         Ok(self.inner.list(&key).await?)
     }
 
+    /// Like `list_handoffs`, but also returns the etcd revision of the
+    /// snapshot. Pair with `watch_handoffs_from(revision + 1)` for a
+    /// gap-free snapshot-then-watch handshake.
+    pub async fn list_handoffs_with_revision(&self) -> Result<(Vec<HandoffState>, i64)> {
+        let key = self.key(StoreKey::HandoffsPrefix);
+        Ok(self.inner.list_with_revision(&key).await?)
+    }
+
+    /// Like `list_handoffs`, but pairs each record with its key's
+    /// `mod_revision`, so a later replacement can be guarded on the
+    /// record being exactly the one this snapshot read.
+    pub async fn list_handoffs_with_mod_revisions(&self) -> Result<Vec<(HandoffState, i64)>> {
+        let key = self.key(StoreKey::HandoffsPrefix);
+        Ok(self.inner.list_with_mod_revisions(&key).await?)
+    }
+
     pub async fn put_handoff(&self, handoff: &HandoffState) -> Result<()> {
         let key = self.key(StoreKey::Handoff(handoff.partition));
         Ok(self.inner.put(&key, handoff, None).await?)
+    }
+
+    /// Compare-and-swap a handoff's phase. Reads the current handoff,
+    /// verifies its phase matches `expected`, and writes a copy with
+    /// `new_phase` only if the etcd key's mod_revision hasn't changed —
+    /// mod_revision rather than version, so the guard can never match a
+    /// different incarnation of the key after a delete-and-recreate.
+    ///
+    /// Returns `Ok(true)` if the swap succeeded, `Ok(false)` if the handoff
+    /// was concurrently modified or its phase no longer matches `expected`.
+    /// Used by `check_phase_advance` to avoid duplicate phase writes when
+    /// multiple watch loops fire `check_phase_advance` concurrently for the
+    /// same partition.
+    pub async fn cas_handoff_phase(
+        &self,
+        partition: u32,
+        expected: crate::types::HandoffPhase,
+        new_phase: crate::types::HandoffPhase,
+    ) -> Result<bool> {
+        let handoff_key = self.key(StoreKey::Handoff(partition));
+        let Some((mut handoff, mod_revision)) = self
+            .inner
+            .get_with_mod_revision::<HandoffState>(&handoff_key)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if handoff.phase != expected {
+            return Ok(false);
+        }
+        handoff.phase = new_phase;
+        // The phase clock restarts with the phase: duration metrics and
+        // the per-phase age gauge read this stamp.
+        handoff.phase_entered_at_ms = assignment_coordination::util::now_millis();
+        let txn = Txn::new()
+            .when(vec![Compare::mod_revision(
+                handoff_key.clone(),
+                CompareOp::Equal,
+                mod_revision,
+            )])
+            .and_then(vec![TxnOp::put(
+                handoff_key,
+                serde_json::to_vec(&handoff)?,
+                None,
+            )]);
+        let resp = self.inner.txn(txn).await?;
+        Ok(resp.succeeded())
+    }
+
+    /// Read a handoff along with its etcd mod_revision, for use with
+    /// `delete_handoff_and_acks_if_unchanged`.
+    pub async fn get_handoff_with_mod_revision(
+        &self,
+        partition: u32,
+    ) -> Result<Option<(HandoffState, i64)>> {
+        let key = self.key(StoreKey::Handoff(partition));
+        Ok(self.inner.get_with_mod_revision(&key).await?)
+    }
+
+    /// Atomically delete a handoff record and every ack written for its
+    /// partition — but only if the record's mod_revision still matches
+    /// `expected_mod_revision`. Cleanup decisions are made against snapshot
+    /// reads that can race a concurrent delete-and-recreate at the same
+    /// key (cancellation followed by an immediate rebalance); an unguarded
+    /// delete pair would destroy the healthy successor handoff and its
+    /// acks. Returns whether the delete happened.
+    pub async fn delete_handoff_and_acks_if_unchanged(
+        &self,
+        partition: u32,
+        expected_mod_revision: i64,
+    ) -> Result<bool> {
+        let handoff_key = self.key(StoreKey::Handoff(partition));
+        let prefix_delete = || Some(DeleteOptions::new().with_prefix());
+        let txn = Txn::new()
+            .when(vec![Compare::mod_revision(
+                handoff_key.clone(),
+                CompareOp::Equal,
+                expected_mod_revision,
+            )])
+            .and_then(vec![
+                TxnOp::delete(
+                    self.key(StoreKey::FreezeAcksForPartition(partition)),
+                    prefix_delete(),
+                ),
+                TxnOp::delete(
+                    self.key(StoreKey::DrainedAcksForPartition(partition)),
+                    prefix_delete(),
+                ),
+                TxnOp::delete(
+                    self.key(StoreKey::WarmedAcksForPartition(partition)),
+                    prefix_delete(),
+                ),
+                TxnOp::delete(handoff_key, None),
+            ]);
+        let resp = self.inner.txn(txn).await?;
+        Ok(resp.succeeded())
     }
 
     pub async fn delete_handoff(&self, partition: u32) -> Result<()> {
@@ -191,40 +362,167 @@ impl PersonhogStore {
         Ok(self.inner.watch(&key).await?)
     }
 
-    // ── Router cutover ack operations ────────────────────────────
+    /// Watch handoffs from an explicit revision (inclusive), replaying
+    /// events since that revision even if they predate the watch's
+    /// creation.
+    pub async fn watch_handoffs_from(&self, start_revision: i64) -> Result<WatchStream> {
+        let key = self.key(StoreKey::HandoffsPrefix);
+        Ok(self.inner.watch_from(&key, start_revision).await?)
+    }
 
-    pub async fn put_router_ack(&self, ack: &RouterCutoverAck) -> Result<()> {
-        let key = self.key(StoreKey::HandoffAck {
+    // ── Freeze ack operations (router -> coordinator) ────────────
+
+    pub async fn put_freeze_ack(&self, ack: &RouterFreezeAck) -> Result<()> {
+        let key = self.key(StoreKey::FreezeAck {
             partition: ack.partition,
             router: &ack.router_name,
         });
-        Ok(self.inner.put(&key, ack, None).await?)
+        // The store stamps the millisecond clock so span metrics never
+        // depend on each writer remembering to.
+        let mut stamped = ack.clone();
+        stamped.acked_at_ms = assignment_coordination::util::now_millis();
+        Ok(self.inner.put(&key, &stamped, None).await?)
     }
 
-    pub async fn list_router_acks(&self, partition: u32) -> Result<Vec<RouterCutoverAck>> {
-        let key = self.key(StoreKey::HandoffAcksForPartition(partition));
+    pub async fn list_freeze_acks(&self, partition: u32) -> Result<Vec<RouterFreezeAck>> {
+        let key = self.key(StoreKey::FreezeAcksForPartition(partition));
         Ok(self.inner.list(&key).await?)
     }
 
-    pub async fn delete_router_acks(&self, partition: u32) -> Result<()> {
-        let key = self.key(StoreKey::HandoffAcksForPartition(partition));
+    pub async fn delete_freeze_acks(&self, partition: u32) -> Result<()> {
+        let key = self.key(StoreKey::FreezeAcksForPartition(partition));
         Ok(self.inner.delete_prefix(&key).await?)
     }
 
-    pub async fn watch_handoff_acks(&self) -> Result<WatchStream> {
-        let key = self.key(StoreKey::HandoffAcksPrefix);
+    pub async fn watch_freeze_acks(&self) -> Result<WatchStream> {
+        let key = self.key(StoreKey::FreezeAcksPrefix);
         Ok(self.inner.watch(&key).await?)
+    }
+
+    pub async fn watch_freeze_acks_from(&self, start_revision: i64) -> Result<WatchStream> {
+        let key = self.key(StoreKey::FreezeAcksPrefix);
+        Ok(self.inner.watch_from(&key, start_revision).await?)
+    }
+
+    // ── Drained ack operations (old owner -> coordinator) ────────
+
+    pub async fn put_drained_ack(&self, ack: &PodDrainedAck) -> Result<()> {
+        let key = self.key(StoreKey::DrainedAck {
+            partition: ack.partition,
+            pod: &ack.pod_name,
+        });
+        // The store stamps the millisecond clock so span metrics never
+        // depend on each writer remembering to.
+        let mut stamped = ack.clone();
+        stamped.acked_at_ms = assignment_coordination::util::now_millis();
+        Ok(self.inner.put(&key, &stamped, None).await?)
+    }
+
+    pub async fn list_drained_acks(&self, partition: u32) -> Result<Vec<PodDrainedAck>> {
+        let key = self.key(StoreKey::DrainedAcksForPartition(partition));
+        Ok(self.inner.list(&key).await?)
+    }
+
+    pub async fn delete_drained_acks(&self, partition: u32) -> Result<()> {
+        let key = self.key(StoreKey::DrainedAcksForPartition(partition));
+        Ok(self.inner.delete_prefix(&key).await?)
+    }
+
+    pub async fn watch_drained_acks(&self) -> Result<WatchStream> {
+        let key = self.key(StoreKey::DrainedAcksPrefix);
+        Ok(self.inner.watch(&key).await?)
+    }
+
+    pub async fn watch_drained_acks_from(&self, start_revision: i64) -> Result<WatchStream> {
+        let key = self.key(StoreKey::DrainedAcksPrefix);
+        Ok(self.inner.watch_from(&key, start_revision).await?)
+    }
+
+    // ── Warmed ack operations (new owner -> coordinator) ─────────
+
+    pub async fn put_warmed_ack(&self, ack: &PodWarmedAck) -> Result<()> {
+        let key = self.key(StoreKey::WarmedAck {
+            partition: ack.partition,
+            pod: &ack.pod_name,
+        });
+        // The store stamps the millisecond clock so span metrics never
+        // depend on each writer remembering to.
+        let mut stamped = ack.clone();
+        stamped.acked_at_ms = assignment_coordination::util::now_millis();
+        Ok(self.inner.put(&key, &stamped, None).await?)
+    }
+
+    pub async fn list_warmed_acks(&self, partition: u32) -> Result<Vec<PodWarmedAck>> {
+        let key = self.key(StoreKey::WarmedAcksForPartition(partition));
+        Ok(self.inner.list(&key).await?)
+    }
+
+    pub async fn delete_warmed_acks(&self, partition: u32) -> Result<()> {
+        let key = self.key(StoreKey::WarmedAcksForPartition(partition));
+        Ok(self.inner.delete_prefix(&key).await?)
+    }
+
+    pub async fn watch_warmed_acks(&self) -> Result<WatchStream> {
+        let key = self.key(StoreKey::WarmedAcksPrefix);
+        Ok(self.inner.watch(&key).await?)
+    }
+
+    pub async fn watch_warmed_acks_from(&self, start_revision: i64) -> Result<WatchStream> {
+        let key = self.key(StoreKey::WarmedAcksPrefix);
+        Ok(self.inner.watch_from(&key, start_revision).await?)
     }
 
     // ── Transactional operations ────────────────────────────────
 
     /// Atomically write assignments and create handoff states.
+    /// Returns whether the transaction applied. Guarded so a plan only
+    /// lands if the world it was computed from is still the world:
+    ///
+    /// * every handoff key must be absent — concurrent planners (the pod
+    ///   watch racing the handoff watch's re-trigger, or a failing-over
+    ///   coordinator) can both plan the same partition, and an unguarded
+    ///   put would replace the first handoff and orphan its acks;
+    /// * every `AssignmentPrecondition` must hold — a handoff's
+    ///   `old_owner` is only meaningful if the assignment it was read
+    ///   from is unchanged. Without this, a plan whose snapshot predates
+    ///   a full create→complete→cleanup cycle of the same partition
+    ///   passes the absence guard and drains the wrong pod, leaving the
+    ///   real owner unfenced beside the new owner's warm cutoff.
+    ///
+    /// All-or-nothing on purpose — a plan is one consistent placement
+    /// computation, and the losing caller replans off the winner's writes
+    /// rather than applying a half-stale plan.
+    ///
+    /// `replacements` carry cancellations-by-replacement: each swaps the
+    /// record at its partition's key — guarded on the `mod_revision` the
+    /// planner read — for the successor (or reaffirm) record, deleting
+    /// the predecessor's acks in the same transaction. A non-terminal
+    /// handoff record is never deleted; it is only ever replaced by the
+    /// thing that resolves its stashes.
     pub async fn create_assignments_and_handoffs(
         &self,
         assignments: &[PartitionAssignment],
         handoffs: &[HandoffState],
-    ) -> Result<()> {
-        let mut ops: Vec<TxnOp> = Vec::with_capacity(assignments.len() + handoffs.len());
+        preconditions: &[AssignmentPrecondition],
+    ) -> Result<bool> {
+        self.apply_plan(assignments, handoffs, &[], preconditions)
+            .await
+    }
+
+    /// The full plan-application transaction: creations (absent-guarded)
+    /// plus cancellations-by-replacement (mod_revision-guarded), all or
+    /// nothing.
+    pub async fn apply_plan(
+        &self,
+        assignments: &[PartitionAssignment],
+        handoffs: &[HandoffState],
+        replacements: &[HandoffReplacement],
+        preconditions: &[AssignmentPrecondition],
+    ) -> Result<bool> {
+        let mut guards: Vec<Compare> =
+            Vec::with_capacity(handoffs.len() + replacements.len() + preconditions.len());
+        let mut ops: Vec<TxnOp> =
+            Vec::with_capacity(assignments.len() + handoffs.len() + replacements.len() * 4);
 
         for a in assignments {
             let key = self.key(StoreKey::Assignment(a.partition));
@@ -234,12 +532,54 @@ impl PersonhogStore {
         for h in handoffs {
             let key = self.key(StoreKey::Handoff(h.partition));
             let value = serde_json::to_vec(h)?;
+            // A key that was never created has create_revision 0 — the
+            // canonical etcd existence guard.
+            guards.push(Compare::create_revision(key.clone(), CompareOp::Equal, 0));
             ops.push(TxnOp::put(key, value, None));
         }
+        let prefix_delete = || Some(DeleteOptions::new().with_prefix());
+        for r in replacements {
+            let partition = r.handoff.partition;
+            let key = self.key(StoreKey::Handoff(partition));
+            let value = serde_json::to_vec(&r.handoff)?;
+            guards.push(Compare::mod_revision(
+                key.clone(),
+                CompareOp::Equal,
+                r.expected_mod_revision,
+            ));
+            ops.push(TxnOp::delete(
+                self.key(StoreKey::FreezeAcksForPartition(partition)),
+                prefix_delete(),
+            ));
+            ops.push(TxnOp::delete(
+                self.key(StoreKey::DrainedAcksForPartition(partition)),
+                prefix_delete(),
+            ));
+            ops.push(TxnOp::delete(
+                self.key(StoreKey::WarmedAcksForPartition(partition)),
+                prefix_delete(),
+            ));
+            ops.push(TxnOp::put(key, value, None));
+        }
+        for precondition in preconditions {
+            match precondition {
+                AssignmentPrecondition::UnchangedSince {
+                    partition,
+                    mod_revision,
+                } => {
+                    let key = self.key(StoreKey::Assignment(*partition));
+                    guards.push(Compare::mod_revision(key, CompareOp::Equal, *mod_revision));
+                }
+                AssignmentPrecondition::Absent { partition } => {
+                    let key = self.key(StoreKey::Assignment(*partition));
+                    guards.push(Compare::create_revision(key, CompareOp::Equal, 0));
+                }
+            }
+        }
 
-        let txn = Txn::new().and_then(ops);
-        self.inner.txn(txn).await?;
-        Ok(())
+        let txn = Txn::new().when(guards).and_then(ops);
+        let resp = self.inner.txn(txn).await?;
+        Ok(resp.succeeded())
     }
 
     /// Atomically: set handoff phase to Complete and update the assignment owner.
@@ -249,30 +589,40 @@ impl PersonhogStore {
     /// between our read and write).
     ///
     /// Returns `Ok(false)` if the handoff was modified concurrently (CAS failed).
+    ///
+    /// **Invariant:** this is the only code path that ever *changes* an
+    /// assignment's `owner`. Routers rely on observing handoff Complete
+    /// events to update their in-memory routing tables — they do not watch
+    /// assignments. Anything that mutates `assignments/{partition}` outside
+    /// of this method will be invisible to routers. If we ever need a
+    /// force-reassignment ops tool, it should create a handoff record and
+    /// let the protocol advance it, not write to the assignment key.
     pub async fn complete_handoff(&self, partition: u32) -> Result<bool> {
         let handoff_key = self.key(StoreKey::Handoff(partition));
 
-        let (mut handoff, version) = self
+        let (mut handoff, mod_revision) = self
             .inner
-            .get_versioned::<HandoffState>(&handoff_key)
+            .get_with_mod_revision::<HandoffState>(&handoff_key)
             .await?
             .ok_or_else(|| Error::NotFound(format!("handoff for partition {partition}")))?;
 
         handoff.phase = crate::types::HandoffPhase::Complete;
+        handoff.phase_entered_at_ms = assignment_coordination::util::now_millis();
 
         let assignment = PartitionAssignment {
             partition,
             owner: handoff.new_owner.clone(),
+            advertise_address: handoff.new_owner_address.clone(),
             status: AssignmentStatus::Active,
         };
 
         let assignment_key = self.key(StoreKey::Assignment(partition));
 
         let txn = Txn::new()
-            .when(vec![Compare::version(
+            .when(vec![Compare::mod_revision(
                 handoff_key.clone(),
                 CompareOp::Equal,
-                version,
+                mod_revision,
             )])
             .and_then(vec![
                 TxnOp::put(handoff_key, serde_json::to_vec(&handoff)?, None),
@@ -340,7 +690,7 @@ impl PersonhogStore {
             .get_raw(&key)
             .await?
             .ok_or_else(|| Error::NotFound(key))?;
-        let s = std::str::from_utf8(&bytes)
+        let s = from_utf8(&bytes)
             .map_err(|e| Error::invalid_state(format!("non-utf8 total_partitions: {e}")))?;
         s.parse::<u32>()
             .map_err(|e| Error::invalid_state(format!("invalid total_partitions: {e}")))

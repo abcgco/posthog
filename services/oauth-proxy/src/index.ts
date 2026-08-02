@@ -4,7 +4,7 @@
  * A Cloudflare Worker that sits in front of both US and EU PostHog instances,
  * providing a single OAuth endpoint that handles region routing transparently.
  *
- * Used by the PostHog MCP server, PostHog Code, and any future OAuth integration
+ * Used by the PostHog MCP server, PostHog Desktop, and any future OAuth integration
  * so they don't need separate US/EU URLs.
  */
 import { handleAuthorize } from '@/handlers/authorize'
@@ -13,6 +13,7 @@ import { handleMetadata } from '@/handlers/metadata'
 import { handleIntrospect, handleJwks, handleRevoke, handleUserInfo } from '@/handlers/passthrough'
 import { handleRegister } from '@/handlers/register'
 import { handleToken } from '@/handlers/token'
+import { type Validator, errorResponse, noDuplicateParams, runValidators } from '@/lib/validation'
 
 export interface Env {
     AUTH_KV: KVNamespace
@@ -23,6 +24,7 @@ type Handler = (request: Request, kv: KVNamespace) => Response | Promise<Respons
 interface Route {
     paths: string[]
     method?: string
+    validators?: Validator[]
     handler: Handler
 }
 
@@ -33,43 +35,58 @@ function normalizePath(path: string): string {
 const routes: Route[] = [
     {
         paths: ['/.well-known/oauth-authorization-server'],
-        handler: (req) => handleMetadata(req),
+        handler: handleMetadata,
     },
     {
         paths: ['/.well-known/jwks.json'],
-        handler: (req) => handleJwks(req),
+        handler: handleJwks,
     },
     {
         paths: ['/oauth/register', '/register'],
         method: 'POST',
-        handler: (req, kv) => handleRegister(req, kv),
+        handler: handleRegister,
     },
     {
         paths: ['/oauth/authorize', '/authorize'],
-        handler: (req, kv) => handleAuthorize(req, kv),
+        // The proxy reads these with `.get()` (first value) for KV keying but forwards
+        // the last value downstream via `.set()`; a duplicate would split those reads
+        // and let an attacker route a victim's callback to a preloaded redirect URI.
+        // `resource` (RFC 8707) is intentionally excluded — it is allowed to repeat.
+        validators: [
+            noDuplicateParams(
+                'state',
+                'client_id',
+                'redirect_uri',
+                'response_type',
+                'scope',
+                'code_challenge',
+                'code_challenge_method'
+            ),
+        ],
+        handler: handleAuthorize,
     },
     {
         paths: ['/oauth/callback'],
-        handler: (req, kv) => handleCallback(req, kv),
+        handler: handleCallback,
     },
     {
         paths: ['/oauth/token', '/token'],
         method: 'POST',
-        handler: (req, kv) => handleToken(req, kv),
+        handler: handleToken,
     },
     {
         paths: ['/oauth/revoke'],
         method: 'POST',
-        handler: (req, kv) => handleRevoke(req, kv),
+        handler: handleRevoke,
     },
     {
         paths: ['/oauth/introspect'],
         method: 'POST',
-        handler: (req) => handleIntrospect(req),
+        handler: handleIntrospect,
     },
     {
         paths: ['/oauth/userinfo'],
-        handler: (req) => handleUserInfo(req),
+        handler: handleUserInfo,
     },
 ]
 
@@ -84,12 +101,18 @@ export default {
                     continue
                 }
                 if (route.paths.some((p) => normalizePath(p) === normalized)) {
-                    return route.handler(request, env.AUTH_KV)
+                    if (route.validators) {
+                        const validationError = runValidators(route.validators, request, url)
+                        if (validationError) {
+                            return errorResponse(validationError)
+                        }
+                    }
+                    return await route.handler(request, env.AUTH_KV)
                 }
             }
 
             if (normalized === '') {
-                return new Response('PostHog OAuth Proxy — https://posthog.com/docs/model-context-protocol', {
+                return new Response('PostHog OAuth Proxy - https://posthog.com/docs/api/oauth', {
                     headers: { 'Content-Type': 'text/plain' },
                 })
             }

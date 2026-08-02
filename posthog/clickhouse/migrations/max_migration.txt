@@ -1,1 +1,1 @@
-0226_add_error_tracking_fingerprint_issue_state
+0291_add_ai_channel_type

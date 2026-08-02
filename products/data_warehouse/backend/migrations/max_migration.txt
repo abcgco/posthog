@@ -1,1 +1,1 @@
-0041_migrate_stripe_job_inputs_to_auth_type
+0057_managed_warehouse_backfill_partition
