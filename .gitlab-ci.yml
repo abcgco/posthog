@@ -31,8 +31,11 @@ deploy_posthog:
     # Copy compose files and configs to parent directory
     - cp posthog/docker-compose.base.yml docker-compose.base.yml
     - cp posthog/docker-compose.hobby.yml docker-compose.yml
-    - cp -r posthog/docker/ docker/
-    - cp -r posthog/compose/ compose/
+    # Точка обязательна: без неё cp кладёт копию ВНУТРЬ существующего каталога
+    # (получается docker/docker/), а настоящие конфиги на сервере остаются протухшими
+    - mkdir -p docker compose
+    - cp -rf posthog/docker/. docker/
+    - cp -rf posthog/compose/. compose/
 
     # Create network if not exists
     - docker network create web 2>/dev/null || true
@@ -79,6 +82,27 @@ deploy_posthog:
 
     # Ensure Kafka topics exist
     - docker compose -f docker-compose.yml run --rm kafka-init || true
+
+    # Гейт: compose/start поднимает приложение даже если миграции упали, поэтому
+    # 200 на /_health ничего не доказывает. Схема ClickHouse простояла на 0003 из 226
+    # с апреля по август именно потому, что этой проверки не было.
+    - |
+      echo "Ожидание миграций (до 20 минут)..."
+      MIGRATIONS_OK=0
+      for i in $(seq 1 60); do
+        if docker compose -f docker-compose.yml exec -T web python manage.py migrate_clickhouse --check >/dev/null 2>&1 \
+           && docker compose -f docker-compose.yml exec -T web python manage.py migrate --check >/dev/null 2>&1; then
+          MIGRATIONS_OK=1
+          echo "Миграции применены полностью"
+          break
+        fi
+        sleep 20
+      done
+      if [ "$MIGRATIONS_OK" != "1" ]; then
+        echo "ОШИБКА: миграции не доехали, схема отстаёт от кода"
+        docker compose -f docker-compose.yml exec -T web python manage.py migrate_clickhouse --plan 2>&1 | tail -20
+        exit 1
+      fi
 
     - echo "Done! PostHog is starting at https://$POSTHOG_DOMAIN"
   only:
