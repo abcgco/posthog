@@ -267,6 +267,17 @@ services:
         logging: *default-logging
         environment:
             PLUGIN_SERVER_MODE: 'ingestion-errortracking'
+            # HOS-50tp (09.08.2026): апстримовский hobby-компоуз отстал от новой
+            # архитектуры error tracking, и обе стороны разъехались по умолчаниям.
+            # 1) capture пишет исключения в error_tracking_events (rust/capture/src/config.rs,
+            #    envconfig default), а этот потребитель по умолчанию читает
+            #    ingestion-errortracking-main, куда никто никогда не писал: 0 сообщений.
+            # 2) ERROR_TRACKING_CYMBAL_BASE_URL по умолчанию localhost:3302, то есть сам
+            #    контейнер потребителя, а не соседний сервис cymbal.
+            # Итог до правки: с 03.08 каждый краш и каждое серверное исключение молча
+            # копились в Kafka и не доходили ни до ClickHouse, ни до интерфейса.
+            ERROR_TRACKING_CONSUMER_CONSUME_TOPIC: 'error_tracking_events'
+            ERROR_TRACKING_CYMBAL_BASE_URL: 'http://cymbal:3302'
             PERSONHOG_ENABLED: 'true'
             PERSONHOG_ADDR: 'personhog-router:50052'
             DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
