@@ -195,6 +195,17 @@ services:
             LOGS_REDIS_PORT: 6379
             LOGS_REDIS_TLS: 'false'
             ENCRYPTION_SALT_KEYS: $ENCRYPTION_SALT_KEYS
+            # Набор служб задаётся явно, потому что набор по умолчанию включает
+            # группу cdp_workflows, а та поднимает CdpCyclotronWorkerBatchResolve.
+            # Он требует CYCLOTRON_NODE_DATABASE_URL — отдельную базу с отдельным
+            # набором схем (rust/cyclotron-node-migrations). Ни базы, ни схем в
+            # этой раскладке нет и не было, поэтому служба падала при запуске и
+            # роняла весь плагин-сервер: с 27.08.2026 он перезапускался по кругу.
+            #
+            # Здесь перечислено всё, что давал набор по умолчанию, кроме этой
+            # группы. Понадобятся рабочие процессы cyclotron — сначала завести
+            # базу и накатить схемы, потом вернуть cdp_workflows.
+            NODEJS_CAPABILITY_GROUPS: 'cdp,realtime_cohorts,feature_flags'
             CYCLOTRON_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             PERSONS_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             BEHAVIORAL_COHORTS_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
@@ -519,6 +530,16 @@ services:
             - browserless
 
     cyclotron-janitor:
+        # По умолчанию не поднимается. Уборщик чистит очередь заданий cyclotron,
+        # а очереди в этой раскладке нет: таблицы cyclotron_jobs в базе posthog
+        # никто не создавал. Он спрашивал её раз в тридцать секунд и писал в лог
+        # базы «relation "cyclotron_jobs" does not exist» — 102 720 строк с
+        # 26.07.2026, больше 98% всех ошибок в логе.
+        #
+        # Определение оставлено целиком: понадобится cyclotron — накатить схемы
+        # и поднять с профилем `docker compose --profile cyclotron up -d`.
+        profiles:
+            - cyclotron
         extends:
             file: docker-compose.base.yml
             service: cyclotron-janitor
