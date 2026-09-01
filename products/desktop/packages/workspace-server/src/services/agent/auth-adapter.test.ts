@@ -169,6 +169,8 @@ describe("AgentAuthAdapter", () => {
     expect(deps.mcpProxy.register).toHaveBeenCalledWith(
       "installation-inst-2",
       "https://proxy.posthog.com/inst-2/",
+      // An auth failure here is about the vendor's credential, not the user's PostHog token.
+      { credentialOwner: "installation" },
     );
     expect(servers).toEqual(
       expect.arrayContaining([
@@ -228,7 +230,102 @@ describe("AgentAuthAdapter", () => {
     });
   });
 
-  it("returns empty approvals when tool fetch fails", async () => {
+  it("includes runtime servers whose tool policies are loaded", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [
+              {
+                id: "inst-ready",
+                url: "https://ready.example.com",
+                proxy_url: "https://proxy.posthog.com/inst-ready/",
+                name: "ready-server",
+                display_name: "Ready Server",
+                auth_type: "oauth",
+                is_enabled: true,
+                pending_oauth: false,
+                needs_reauth: false,
+              },
+            ],
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [
+              { tool_name: "search", approval_state: "needs_approval" },
+            ],
+          }),
+      });
+
+    const configuration = await adapter.getMcpRuntimeConfiguration();
+
+    expect(configuration.servers.map((server) => server.name)).toEqual([
+      "posthog",
+      "ready-server",
+    ]);
+    expect(configuration.policies).toEqual([
+      expect.objectContaining({
+        installationId: "inst-ready",
+        toolName: "search",
+      }),
+    ]);
+  });
+
+  it("describes runtime servers so an agent finds them before connecting", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [
+              {
+                id: "inst-linear",
+                url: "https://mcp.linear.app/mcp",
+                proxy_url: "https://proxy.posthog.com/inst-linear/",
+                name: "Linear",
+                display_name: "Linear",
+                description: "Manage Linear issues, projects, and workflows.",
+                auth_type: "oauth",
+                is_enabled: true,
+                pending_oauth: false,
+                needs_reauth: false,
+              },
+            ],
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            results: [
+              { tool_name: "create_issue", approval_state: "needs_approval" },
+            ],
+          }),
+      });
+
+    const { servers } = await adapter.getMcpRuntimeConfiguration();
+
+    expect(
+      servers.find((server) => server.name === "Linear")?.description,
+    ).toBe("Manage Linear issues, projects, and workflows.");
+    expect(
+      servers.find((server) => server.name === "posthog")?.description,
+    ).toMatch(/insight/i);
+  });
+
+  it("keeps descriptions out of the servers handed to the ACP adapters", async () => {
+    // Only pi understands a server description; claude and codex receive this list as ACP
+    // session params, which reject fields their schema does not declare.
+    const { servers } = await adapter.buildMcpServers(baseCredentials);
+
+    expect(servers.every((server) => !("description" in server))).toBe(true);
+  });
+
+  it("omits runtime servers whose tool policies cannot be loaded", async () => {
     mockFetch
       .mockResolvedValueOnce({
         ok: true,
@@ -249,11 +346,15 @@ describe("AgentAuthAdapter", () => {
             ],
           }),
       })
+      .mockResolvedValueOnce({ ok: false, status: 500 })
       .mockResolvedValueOnce({ ok: false, status: 500 });
 
-    const { toolApprovals } = await adapter.buildMcpServers(baseCredentials);
+    const configuration = await adapter.getMcpRuntimeConfiguration();
 
-    expect(toolApprovals).toEqual({});
+    expect(configuration.servers.map((server) => server.name)).toEqual([
+      "posthog",
+    ]);
+    expect(configuration.policies).toEqual([]);
   });
 
   it("configures environment using the gateway proxy and current token", async () => {

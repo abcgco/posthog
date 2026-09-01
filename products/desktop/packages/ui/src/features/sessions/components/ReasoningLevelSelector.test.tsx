@@ -65,6 +65,20 @@ function claudeModelOption(
   } as unknown as SessionConfigOption;
 }
 
+function mixedModelOption(currentValue = "claude-opus-5"): SessionConfigOption {
+  return {
+    type: "select",
+    id: "model",
+    name: "Model",
+    category: "model",
+    currentValue,
+    options: [
+      { name: "Claude Opus 5", value: "claude-opus-5" },
+      { name: "GLM 5.2", value: "@cf/zai-org/glm-5.2" },
+    ],
+  } as unknown as SessionConfigOption;
+}
+
 function effortlessModelOption(): SessionConfigOption {
   return {
     type: "select",
@@ -106,8 +120,11 @@ function fastOption(currentValue = "off"): SessionConfigOption {
   } as unknown as SessionConfigOption;
 }
 
-async function openAdvanced(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole("button", { name: "Reasoning: High" }));
+async function openAdvanced(
+  user: ReturnType<typeof userEvent.setup>,
+  triggerName: string | RegExp = "Reasoning: High",
+) {
+  await user.click(screen.getByRole("button", { name: triggerName }));
   await user.click(await screen.findByRole("button", { name: "Advanced" }));
 }
 
@@ -161,7 +178,7 @@ describe("ReasoningLevelSelector", () => {
     expect(screen.queryByRole("menuitemradio")).not.toBeInTheDocument();
   });
 
-  it("emits the raw value via onChange once the advanced menu closes", async () => {
+  it("changes reasoning without closing the advanced menu", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     render(
@@ -178,9 +195,11 @@ describe("ReasoningLevelSelector", () => {
     const lowItem = await screen.findByRole("menuitemradio", { name: "Low" });
     fireEvent.click(lowItem);
 
-    await pollUntil(() => onChange.mock.calls.length > 0);
     expect(onChange).toHaveBeenCalledWith("low");
     expect(onChange).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("menuitem", { name: /^Reasoning/ }),
+    ).toBeInTheDocument();
   });
 
   it("marks the adapter default level with a Default badge", async () => {
@@ -341,6 +360,102 @@ describe("ReasoningLevelSelector", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps the Back row when a model change moves off the preset ladder", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { rerender } = render(
+      <Theme>
+        <ReasoningLevelSelector
+          thoughtOption={thoughtOption({ currentValue: "xhigh" })}
+          modelOption={claudeModelOption("claude-opus-5")}
+          adapter="claude"
+        />
+      </Theme>,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Model and reasoning/ }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Advanced" }));
+    expect(
+      await screen.findByRole("button", { name: "Back" }),
+    ).toBeInTheDocument();
+
+    rerender(
+      <Theme>
+        <ReasoningLevelSelector
+          thoughtOption={thoughtOption({ currentValue: "xhigh" })}
+          modelOption={claudeModelOption("claude-sonnet-5")}
+          adapter="claude"
+        />
+      </Theme>,
+    );
+
+    expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument();
+  });
+
+  it("does not grow a Back row when a model change lands on the ladder", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { rerender } = render(
+      <Theme>
+        <ReasoningLevelSelector
+          thoughtOption={thoughtOption({ currentValue: "low" })}
+          modelOption={claudeModelOption("claude-opus-5")}
+          adapter="claude"
+        />
+      </Theme>,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Model and reasoning/ }),
+    );
+    expect(
+      await screen.findByRole("menuitem", { name: /^Model/ }),
+    ).toBeInTheDocument();
+
+    rerender(
+      <Theme>
+        <ReasoningLevelSelector
+          thoughtOption={thoughtOption({ currentValue: "medium" })}
+          modelOption={claudeModelOption("claude-opus-5")}
+          adapter="claude"
+        />
+      </Theme>,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Back" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("switches to Pi from the harness submenu", async () => {
+    const onHarnessChange = vi.fn();
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <Theme>
+        <ReasoningLevelSelector
+          thoughtOption={thoughtOption()}
+          modelOption={claudeModelOption("claude-sonnet-5")}
+          adapter="claude"
+          includePiHarness
+          onHarnessChange={onHarnessChange}
+        />
+      </Theme>,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Model and reasoning/ }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Advanced" }));
+    await openSub(user, /^Harness/);
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Pi" }));
+
+    expect(onHarnessChange).toHaveBeenCalledWith("pi");
+    expect(onHarnessChange).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("menuitem", { name: /^Harness/ }),
+    ).toBeInTheDocument();
+  });
+
   it("changes the model from its advanced submenu", async () => {
     const onModelChange = vi.fn();
     const user = userEvent.setup({ pointerEventsCheck: 0 });
@@ -364,9 +479,11 @@ describe("ReasoningLevelSelector", () => {
       await screen.findByRole("menuitemradio", { name: "Claude Opus 5" }),
     );
 
-    await pollUntil(() => onModelChange.mock.calls.length > 0);
     expect(onModelChange).toHaveBeenCalledWith("claude-opus-5");
     expect(onModelChange).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("menuitem", { name: /^Model/ }),
+    ).toBeInTheDocument();
   });
 
   it("moves the model and effort together on a ladder notch that changes both", async () => {
@@ -516,9 +633,78 @@ describe("ReasoningLevelSelector", () => {
       </Theme>,
     );
 
-    expect(screen.getByRole("button", { name: /Loading/ })).toHaveAttribute(
-      "aria-disabled",
-      "true",
-    );
+    expect(screen.getByRole("button", { name: /Loading/ })).toBeInTheDocument();
   });
+
+  it("keeps an open menu mounted while a harness switch reloads the config", async () => {
+    render(
+      <Theme>
+        <ReasoningLevelSelector
+          isLoading
+          adapter="claude"
+          onHarnessChange={() => {}}
+          includePiHarness
+          menuOpen
+          onMenuOpenChange={() => {}}
+        />
+      </Theme>,
+    );
+
+    expect(
+      await screen.findByRole("menuitem", { name: /Harness/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("blocks a model the Claude plan cannot run and names the reason", async () => {
+    const onModelChange = vi.fn();
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <Theme>
+        <ReasoningLevelSelector
+          thoughtOption={thoughtOption()}
+          modelOption={mixedModelOption()}
+          adapter="claude"
+          modelAccess="own-subscription"
+          onModelChange={onModelChange}
+        />
+      </Theme>,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /^Model and reasoning/ }),
+    );
+    await openSub(user, /^Model/);
+    const gatewayOnly = await screen.findByRole("menuitemradio", {
+      name: /GLM 5\.2/,
+    });
+
+    fireEvent.click(gatewayOnly);
+    expect(onModelChange).not.toHaveBeenCalled();
+  }, 20000);
+
+  it("lets every model through on PostHog credits", async () => {
+    const onModelChange = vi.fn();
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    render(
+      <Theme>
+        <ReasoningLevelSelector
+          thoughtOption={thoughtOption()}
+          modelOption={mixedModelOption()}
+          adapter="claude"
+          modelAccess="posthog-gateway"
+          onModelChange={onModelChange}
+        />
+      </Theme>,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /^Model and reasoning/ }),
+    );
+    await openSub(user, /^Model/);
+    fireEvent.click(
+      await screen.findByRole("menuitemradio", { name: /GLM 5\.2/ }),
+    );
+
+    expect(onModelChange).toHaveBeenCalledWith("@cf/zai-org/glm-5.2");
+  }, 20000);
 });

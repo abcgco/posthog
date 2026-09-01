@@ -44,7 +44,8 @@ const getIncrementalSyncSupported = (
     if (!schema.incremental_available) {
         return {
             disabled: true,
-            disabledReason: "Incremental replication isn't supported on this table",
+            disabledReason:
+                "Incremental replication isn't supported on this table. Use full table replication instead.",
         }
     }
 
@@ -67,7 +68,8 @@ const getAppendOnlySyncSupported = (
     if (!schema.append_available) {
         return {
             disabled: true,
-            disabledReason: "Append only replication isn't supported on this table",
+            disabledReason:
+                "Append only replication isn't supported on this table. Use full table replication instead.",
         }
     }
 
@@ -203,9 +205,9 @@ export const SyncMethodForm = forwardRef<SyncMethodFormHandle, SyncMethodFormPro
     )
     const [incrementalFieldValue, setIncrementalFieldValue] = useState(defaultField)
     const [appendFieldValue, setAppendFieldValue] = useState(defaultField)
-    // Prefill detected PKs only when the selector is editable. For locked schemas
-    // (already synced) the backend rejects any PK diff, so prefilling from detected
-    // would silently turn unrelated edits into "Primary key cannot be changed" errors.
+    // Prefill detected PKs only when the selector is editable. A locked schema already has a key
+    // the backend refuses to swap, so prefilling from detected would silently turn unrelated edits
+    // into "Primary key cannot be changed" errors.
     const [primaryKeyColumns, setPrimaryKeyColumns] = useState<string[]>(
         schema.primary_key_columns ?? (primaryKeyLocked ? [] : (resolvedDetectedPks ?? []))
     )

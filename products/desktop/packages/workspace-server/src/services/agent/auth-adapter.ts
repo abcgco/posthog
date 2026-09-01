@@ -4,6 +4,8 @@ import {
   sanitizeMcpServerName,
 } from "@posthog/agent/adapters/claude/mcp/tool-metadata";
 import { getLlmGatewayUrl } from "@posthog/agent/posthog-api";
+import type { McpServerConnection, McpToolPolicy } from "@posthog/shared";
+import { POSTHOG_PROJECT_ID_HEADER } from "@posthog/shared/posthog-property-headers";
 import { inject, injectable } from "inversify";
 import type { AuthProxyService } from "../auth-proxy/auth-proxy";
 import { AUTH_PROXY_SERVICE } from "../auth-proxy/identifiers";
@@ -13,6 +15,16 @@ import { AGENT_AUTH, AGENT_LOGGER } from "./identifiers";
 import type { AgentAuth, AgentLogger, AgentScopedLogger } from "./ports";
 import type { Credentials } from "./schemas";
 
+/**
+ * Names capabilities rather than describing the server, because the agent's tool search
+ * reads this before the PostHog MCP has ever connected. Mirrors POSTHOG_MCP_DESCRIPTION
+ * in products/tasks, which does the same for cloud runs.
+ */
+const POSTHOG_MCP_DESCRIPTION =
+  "Query and manage a PostHog project: events, insights, dashboards, SQL queries, " +
+  "feature flags, experiments, surveys, error tracking, session replay, logs, " +
+  "LLM analytics, and the data warehouse.";
+
 const VALID_APPROVAL_STATES = new Set([
   "approved",
   "needs_approval",
@@ -20,13 +32,6 @@ const VALID_APPROVAL_STATES = new Set([
 ]);
 function isValidApprovalState(value: string): value is McpToolApprovalState {
   return VALID_APPROVAL_STATES.has(value);
-}
-
-export interface AcpMcpServer {
-  name: string;
-  type: "http";
-  url: string;
-  headers: Array<{ name: string; value: string }>;
 }
 
 export interface AgentPosthogConfig {
@@ -90,12 +95,51 @@ export class AgentAuthAdapter {
     return projectId === null ? null : { apiHost, projectId };
   }
 
-  async buildMcpServers(credentials: Credentials): Promise<{
-    servers: AcpMcpServer[];
+  async getMcpRuntimeConfiguration(): Promise<{
+    servers: McpServerConnection[];
+    policies: McpToolPolicy[];
+  }> {
+    const credentials = await this.getCurrentCredentials();
+    if (!credentials) {
+      return { servers: [], policies: [] };
+    }
+
+    const configuration = await this.buildMcpServers(credentials, {
+      refreshTools: true,
+    });
+    const policyInstallationIds = new Set(
+      configuration.toolPolicies.map((policy) => policy.installationId),
+    );
+    // pi mounts these lazily and never dials one to answer "what can it do", so a server
+    // without a description is only findable by searching its exact name.
+    const servers = configuration.servers.flatMap((server) => {
+      const installationId = configuration.serverInstallationIds.get(server);
+      if (installationId && !policyInstallationIds.has(installationId)) {
+        return [];
+      }
+      const description = configuration.serverDescriptions.get(server);
+      return [description ? { ...server, description } : server];
+    });
+
+    return { servers, policies: configuration.toolPolicies };
+  }
+
+  async buildMcpServers(
+    credentials: Credentials,
+    options: { refreshTools?: boolean } = {},
+  ): Promise<{
+    servers: McpServerConnection[];
     toolApprovals: McpToolApprovals;
     toolInstallations: McpToolInstallations;
+    toolPolicies: McpToolPolicy[];
+    serverInstallationIds: Map<McpServerConnection, string>;
+    serverDescriptions: Map<McpServerConnection, string>;
   }> {
-    const servers: AcpMcpServer[] = [];
+    const servers: McpServerConnection[] = [];
+    const serverInstallationIds = new Map<McpServerConnection, string>();
+    // Kept beside the servers rather than on them: this list also goes to claude and
+    // codex as ACP session params, whose McpServer schema doesn't declare a description.
+    const serverDescriptions = new Map<McpServerConnection, string>();
     const mcpUrl = this.getPostHogMcpUrl(credentials.apiHost);
     // Warm the token so authenticatedFetch() has something cached, but do not
     // bake it into the MCP config — the proxy injects a fresh one on every
@@ -105,19 +149,21 @@ export class AgentAuthAdapter {
     await this.mcpProxy.start();
     const proxiedPosthogUrl = this.mcpProxy.register("posthog", mcpUrl);
 
-    servers.push({
+    const posthogServer: McpServerConnection = {
       name: "posthog",
       type: "http",
       url: proxiedPosthogUrl,
       headers: [
         {
-          name: "x-posthog-project-id",
+          name: POSTHOG_PROJECT_ID_HEADER,
           value: String(credentials.projectId),
         },
         { name: "x-posthog-mcp-version", value: "2" },
         { name: "x-posthog-mcp-consumer", value: "posthog-code" },
       ],
-    });
+    };
+    servers.push(posthogServer);
+    serverDescriptions.set(posthogServer, POSTHOG_MCP_DESCRIPTION);
 
     const installations = await this.fetchMcpInstallations(credentials);
 
@@ -130,19 +176,39 @@ export class AgentAuthAdapter {
       const proxiedUrl = this.mcpProxy.register(
         `installation-${installation.id}`,
         installation.proxy_url,
+        { credentialOwner: "installation" },
       );
-      servers.push({
+      const server: McpServerConnection = {
         name,
         type: "http",
         url: proxiedUrl,
         headers: [],
-      });
+      };
+      servers.push(server);
+      serverInstallationIds.set(server, installation.id);
+      if (installation.description) {
+        serverDescriptions.set(server, installation.description);
+      }
     }
 
-    const { approvals: toolApprovals, toolInstallations } =
-      await this.fetchMcpToolApprovals(credentials, installations);
+    const {
+      approvals: toolApprovals,
+      toolInstallations,
+      policies: toolPolicies,
+    } = await this.fetchMcpToolApprovals(
+      credentials,
+      installations,
+      options.refreshTools ?? false,
+    );
 
-    return { servers, toolApprovals, toolInstallations };
+    return {
+      servers,
+      toolApprovals,
+      toolInstallations,
+      toolPolicies,
+      serverInstallationIds,
+      serverDescriptions,
+    };
   }
 
   async ensureGatewayProxy(apiHost: string): Promise<string> {
@@ -160,6 +226,14 @@ export class AgentAuthAdapter {
     } catch {
       return null;
     }
+  }
+
+  authenticatedFetch(input: string, init?: RequestInit): Promise<Response> {
+    return this.authService.authenticatedFetch(fetch, input, init);
+  }
+
+  gatewayProjectId(): number | null {
+    return this.authService.getState().currentProjectId;
   }
 
   async configureProcessEnv({
@@ -222,6 +296,22 @@ export class AgentAuthAdapter {
     return host.endsWith("/") ? host.slice(0, -1) : host;
   }
 
+  async approveMcpTool(
+    installationId: string,
+    toolName: string,
+  ): Promise<void> {
+    const credentials = await this.getCurrentCredentials();
+    if (!credentials) {
+      throw new Error("PostHog authentication is required");
+    }
+    await this.updateMcpToolApproval(
+      credentials,
+      installationId,
+      toolName,
+      "approved",
+    );
+  }
+
   async updateMcpToolApproval(
     credentials: Credentials,
     installationId: string,
@@ -250,13 +340,16 @@ export class AgentAuthAdapter {
       name: string;
       display_name: string;
     }>,
+    refreshTools: boolean,
   ): Promise<{
     approvals: McpToolApprovals;
     toolInstallations: McpToolInstallations;
+    policies: McpToolPolicy[];
   }> {
     const baseUrl = this.getPostHogApiBaseUrl(credentials.apiHost);
     const approvals: McpToolApprovals = {};
     const toolInstallations: McpToolInstallations = {};
+    const policies: McpToolPolicy[] = [];
 
     const results = await Promise.allSettled(
       installations.map(async (installation) => {
@@ -264,18 +357,30 @@ export class AgentAuthAdapter {
           installation.name || installation.display_name || installation.url,
         );
         const toolsUrl = `${baseUrl}/api/environments/${credentials.projectId}/mcp_server_installations/${installation.id}/tools/`;
+        const refreshUrl = `${toolsUrl}refresh/`;
 
-        const response = await this.authService.authenticatedFetch(
+        let response = await this.authService.authenticatedFetch(
           fetch,
-          toolsUrl,
-          { headers: { "Content-Type": "application/json" } },
+          refreshTools ? refreshUrl : toolsUrl,
+          {
+            method: refreshTools ? "POST" : "GET",
+            headers: { "Content-Type": "application/json" },
+          },
         );
+        if (!response.ok && refreshTools) {
+          response = await this.authService.authenticatedFetch(
+            fetch,
+            toolsUrl,
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
         if (!response.ok) return [];
 
         const data = (await response.json()) as {
           results?: Array<{
             tool_name: string;
             approval_state?: string;
+            description?: string;
           }>;
         };
         return (data.results ?? []).map((tool) => ({
@@ -283,6 +388,7 @@ export class AgentAuthAdapter {
           installationId: installation.id,
           toolName: tool.tool_name,
           approvalState: tool.approval_state,
+          description: tool.description,
         }));
       }),
     );
@@ -306,10 +412,19 @@ export class AgentAuthAdapter {
           installationId: tool.installationId,
           toolName: tool.toolName,
         };
+        if (tool.approvalState && isValidApprovalState(tool.approvalState)) {
+          policies.push({
+            serverName: tool.serverName,
+            toolName: tool.toolName,
+            installationId: tool.installationId,
+            approvalState: tool.approvalState,
+            ...(tool.description ? { description: tool.description } : {}),
+          });
+        }
       }
     }
 
-    return { approvals, toolInstallations };
+    return { approvals, toolInstallations, policies };
   }
 
   private async fetchMcpInstallations(credentials: Credentials): Promise<
@@ -319,6 +434,7 @@ export class AgentAuthAdapter {
       proxy_url: string;
       name: string;
       display_name: string;
+      description?: string;
       auth_type: string;
     }>
   > {
@@ -346,6 +462,7 @@ export class AgentAuthAdapter {
           proxy_url?: string;
           name: string;
           display_name: string;
+          description?: string;
           auth_type: string;
           is_enabled?: boolean;
           pending_oauth: boolean;

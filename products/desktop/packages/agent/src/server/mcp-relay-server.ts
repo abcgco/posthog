@@ -1,12 +1,12 @@
 import crypto from "node:crypto";
 import { type ServerType, serve } from "@hono/node-server";
+import type { McpServerConnection } from "@posthog/shared";
 import { Hono } from "hono";
 import type { Logger } from "../utils/logger";
-import type { RemoteMcpServer } from "./schemas";
 
-export const DEFAULT_RELAY_TIMEOUT_MS = 60_000;
+const DEFAULT_RELAY_TIMEOUT_MS = 60_000;
 /** Request payloads above this are rejected before any event is emitted. */
-export const DEFAULT_MAX_REQUEST_BYTES = 64_000;
+const DEFAULT_MAX_REQUEST_BYTES = 64_000;
 
 /** JSON-RPC error: the desktop app did not answer within the timeout. */
 export const RELAY_TIMEOUT_CODE = -32001;
@@ -49,7 +49,7 @@ export interface McpRelayServerConfig {
 
 /**
  * Loopback HTTP MCP endpoints that relay JSON-RPC to the user's desktop app
- * over the durable event stream (docs/cloud-mcp-relay.md). Each designated
+ * over the durable event stream (docs/CLOUD-MCP-RELAY.md). Each designated
  * server gets `http://127.0.0.1:<port>/relay/<name>`, registered in the
  * session's mcpServers list as a plain streamable-HTTP server — the adapters
  * need no relay awareness. Requests correlate to `mcp_response` commands by
@@ -103,7 +103,7 @@ export class McpRelayServer {
   }
 
   /** Session mcpServers entries for the relay endpoints. Call after start(). */
-  get mcpServers(): RemoteMcpServer[] {
+  get mcpServers(): McpServerConnection[] {
     if (this.port === null) return [];
     return [...this.serverNames].map((name) => ({
       type: "http" as const,

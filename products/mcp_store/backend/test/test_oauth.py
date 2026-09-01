@@ -12,6 +12,7 @@ from products.mcp_store.backend.models import MCPServerInstallation, MCPServerTe
 from products.mcp_store.backend.oauth import (
     TIMEOUT,
     DcrClientRegistration,
+    DCRRegistrationRejectedError,
     OAuthTokenExchangeError,
     SSRFBlockedError,
     TokenRefreshError,
@@ -1057,6 +1058,44 @@ class TestRegisterDCRClient(SimpleTestCase):
         )
         assert mock_post.call_args.kwargs["json"]["token_endpoint_auth_method"] == "client_secret_basic"
 
+    @patch("products.mcp_store.backend.oauth.is_url_allowed", return_value=(True, ""))
+    @patch("products.mcp_store.backend.oauth.requests.post")
+    def test_client_name_has_no_parentheses(self, mock_post, _allow):
+        mock_response = MagicMock()
+        mock_response.ok = True
+        mock_response.status_code = 201
+        mock_response.json.return_value = {"client_id": "abc", "token_endpoint_auth_method": "none"}
+        mock_post.return_value = mock_response
+
+        register_dcr_client(
+            {"registration_endpoint": "https://auth.example.com/register"},
+            "https://app.posthog.com/callback",
+        )
+
+        client_name = mock_post.call_args.kwargs["json"]["client_name"]
+        assert "(" not in client_name and ")" not in client_name
+
+    @patch("products.mcp_store.backend.oauth.is_url_allowed", return_value=(True, ""))
+    @patch("products.mcp_store.backend.oauth.requests.post")
+    def test_surfaces_provider_rejection_message(self, mock_post, _allow):
+        mock_response = MagicMock()
+        mock_response.ok = False
+        mock_response.status_code = 400
+        mock_response.json.return_value = {
+            "error": "invalid_client_metadata",
+            "error_description": "client_name contains invalid characters",
+        }
+        mock_response.text = '{"error": "invalid_client_metadata"}'
+        mock_post.return_value = mock_response
+
+        with self.assertRaises(DCRRegistrationRejectedError) as ctx:
+            register_dcr_client(
+                {"registration_endpoint": "https://auth.example.com/register"},
+                "https://app.posthog.com/callback",
+            )
+
+        assert "client_name contains invalid characters" in ctx.exception.provider_message
+
     def test_scope_selection_prefers_protected_resource_scopes(self):
         metadata = {
             "scopes_supported": ["admin", "read"],
@@ -1091,12 +1130,12 @@ class TestResolveInstallationOauthContext(BaseTest):
             sensitive_configuration={"access_token": "tok"},
         )
 
-        metadata, client_id, client_secret, auth_method = resolve_installation_oauth_context(installation)
+        ctx = resolve_installation_oauth_context(installation)
 
-        assert metadata["token_endpoint"] == "https://auth.template.example.com/token"
-        assert client_id == "template-client"
-        assert client_secret == "template-secret"
-        assert auth_method == "client_secret_basic"
+        assert ctx.metadata["token_endpoint"] == "https://auth.template.example.com/token"
+        assert ctx.client_id == "template-client"
+        assert ctx.client_secret == "template-secret"
+        assert ctx.token_endpoint_auth_method == "client_secret_basic"
 
     def test_dcr_template_backed_install_returns_per_installation_metadata_and_creds(self):
         # DCR templates carry no shared client_id AND no trusted metadata —
@@ -1125,12 +1164,12 @@ class TestResolveInstallationOauthContext(BaseTest):
             },
         )
 
-        metadata, client_id, client_secret, auth_method = resolve_installation_oauth_context(installation)
+        ctx = resolve_installation_oauth_context(installation)
 
-        assert metadata["token_endpoint"] == "https://auth.dcr-template.example.com/token"
-        assert client_id == "minted-for-user"
-        assert client_secret is None
-        assert auth_method == "none"
+        assert ctx.metadata["token_endpoint"] == "https://auth.dcr-template.example.com/token"
+        assert ctx.client_id == "minted-for-user"
+        assert ctx.client_secret is None
+        assert ctx.token_endpoint_auth_method == "none"
 
     def test_custom_install_returns_per_installation_dcr_creds(self):
         installation = MCPServerInstallation.objects.create(
@@ -1145,12 +1184,12 @@ class TestResolveInstallationOauthContext(BaseTest):
             },
         )
 
-        metadata, client_id, client_secret, auth_method = resolve_installation_oauth_context(installation)
+        ctx = resolve_installation_oauth_context(installation)
 
-        assert metadata["token_endpoint"] == "https://auth.custom.example.com/token"
-        assert client_id == "per-user-client"
-        assert client_secret == "per-user-secret"
-        assert auth_method == "client_secret_basic"
+        assert ctx.metadata["token_endpoint"] == "https://auth.custom.example.com/token"
+        assert ctx.client_id == "per-user-client"
+        assert ctx.client_secret == "per-user-secret"
+        assert ctx.token_endpoint_auth_method == "client_secret_basic"
 
     def test_custom_install_without_secret_returns_none(self):
         installation = MCPServerInstallation.objects.create(
@@ -1162,10 +1201,10 @@ class TestResolveInstallationOauthContext(BaseTest):
             sensitive_configuration={"dcr_client_id": "public-client"},
         )
 
-        _metadata, _client_id, client_secret, auth_method = resolve_installation_oauth_context(installation)
+        ctx = resolve_installation_oauth_context(installation)
 
-        assert client_secret is None
-        assert auth_method == "none"
+        assert ctx.client_secret is None
+        assert ctx.token_endpoint_auth_method == "none"
 
 
 class TestExchangeOauthToken(BaseTest):

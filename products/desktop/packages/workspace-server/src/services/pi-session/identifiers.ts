@@ -3,10 +3,13 @@ import type {
   PiRpcClientOptions,
 } from "@posthog/agent/pi/rpc-client";
 import type { PiRuntime } from "@posthog/agent/pi/runtime";
+import type { TaskContextInput } from "@posthog/agent/pi/task-system-prompt";
 
 export interface PiRpcClientFactory {
   create(
-    input: Pick<PiRpcClientOptions, "cwd" | "model" | "sessionFile">,
+    input: Pick<PiRpcClientOptions, "model" | "sessionFile"> & {
+      taskContext: TaskContextInput;
+    },
   ): Promise<PiRpcClient>;
 }
 
@@ -15,11 +18,9 @@ export const PI_RPC_CLIENT_FACTORY = Symbol.for(
 );
 
 export interface PiRuntimeFactory {
-  create(input: {
-    cwd: string;
-    model?: string;
-    sessionFile?: string;
-  }): Promise<PiRuntime>;
+  create(
+    input: Parameters<PiRpcClientFactory["create"]>[0],
+  ): Promise<PiRuntime>;
 }
 
 export const PI_RUNTIME_FACTORY = Symbol.for(

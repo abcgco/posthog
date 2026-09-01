@@ -210,14 +210,20 @@ export class MessageAssetsService {
 
     queueInvocationResults(results: CyclotronJobInvocationResult[]): void {
         for (const result of results) {
-            if (!result.emailAssets || result.emailAssets.length === 0) {
+            if (!result.messageAssets || result.messageAssets.length === 0) {
                 continue
             }
-            for (const row of result.emailAssets) {
+            for (const row of result.messageAssets) {
                 this.queuedRows.push(row)
             }
         }
         messageAssetsPendingRows.set(this.queuedRows.length)
+    }
+
+    // Required by ResultSink. This sink holds nothing of its own: it writes through the shared
+    // Kafka outputs, which the server disconnects separately on shutdown.
+    async stop(): Promise<void> {
+        return Promise.resolve()
     }
 
     async flush(): Promise<void> {

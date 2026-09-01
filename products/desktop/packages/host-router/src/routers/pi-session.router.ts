@@ -2,6 +2,7 @@ import { publicProcedure, router } from "@posthog/host-trpc/trpc";
 import { PI_SESSION_SERVICE } from "@posthog/workspace-server/services/pi-session/identifiers";
 import type { PiSessionService } from "@posthog/workspace-server/services/pi-session/pi-session";
 import {
+  piExtensionUIResponseInput,
   piQueueSnapshotOutput,
   piRpcResponseSchema,
   piSessionConfigInput,
@@ -10,6 +11,7 @@ import {
   piSessionRpcInput,
   piSessionStartOutput,
   piSessionTaskInput,
+  respondMcpToolPermissionInput,
   resumePiSessionInput,
   startPiSessionInput,
 } from "@posthog/workspace-server/services/pi-session/schemas";
@@ -64,6 +66,44 @@ export const piSessionRouter = router({
       getService(ctx.container).clearQueue(input.taskId),
     ),
 
+  respondMcpToolPermission: publicProcedure
+    .input(respondMcpToolPermissionInput)
+    .mutation(({ ctx, input }) =>
+      getService(ctx.container).respondMcpToolPermission(
+        input.taskId,
+        input.request,
+        input.decision,
+      ),
+    ),
+
+  onMcpToolPermissionRequest: publicProcedure
+    .input(piSessionTaskInput)
+    .subscription(async function* (opts) {
+      const service = getService(opts.ctx.container);
+      const iterable = service.toIterable("mcpPermissionRequest", {
+        signal: opts.signal,
+      });
+      for (const request of service.getPendingMcpToolPermissions(
+        opts.input.taskId,
+      )) {
+        yield request;
+      }
+      for await (const payload of iterable) {
+        if (payload.taskId === opts.input.taskId) {
+          yield payload.request;
+        }
+      }
+    }),
+
+  respondToExtensionUI: publicProcedure
+    .input(piExtensionUIResponseInput)
+    .mutation(({ ctx, input }) =>
+      getService(ctx.container).respondToExtensionUI(
+        input.taskId,
+        input.response,
+      ),
+    ),
+
   onEvent: publicProcedure
     .input(piSessionTaskInput)
     .subscription(async function* (opts) {
@@ -75,4 +115,10 @@ export const piSessionRouter = router({
         }
       }
     }),
+
+  onExtensionEvent: publicProcedure
+    .input(piSessionTaskInput)
+    .subscription(({ ctx, input, signal }) =>
+      getService(ctx.container).extensionEvents(input.taskId, signal),
+    ),
 });

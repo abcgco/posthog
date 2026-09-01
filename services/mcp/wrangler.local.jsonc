@@ -1,0 +1,74 @@
+/**
+ * Self-hosted deploy override for @posthog/mcp.
+ *
+ * Deploy: wrangler deploy -c wrangler.local.jsonc
+ *
+ * Differences from upstream wrangler.jsonc:
+ *  - name:           unique to this fork (avoids collision with upstream "mcp1")
+ *  - observability:  removed "destinations: ['posthog']" — that's PostHog Inc.'s
+ *                    Logpush integration, not present on our CF account
+ *  - vars:           removed MCP_APPS_BASE_URL — UI apps disabled for MVP
+ *  - assets:         removed — public/ only exists after `pnpm run build:ui-apps`,
+ *                    which builds embeddable MCP UI apps we don't need for
+ *                    live artifacts / Cowork use case
+ *
+ * Env secrets to set after first deploy (wrangler secret put):
+ *  - POSTHOG_API_BASE_URL = https://ph.hedyos.com
+ *  Optional:
+ *  - OAUTH_AUTHORIZATION_SERVER_URL (if OAuth lives on a different host)
+ *  - INKEEP_API_KEY, MCP_CAT_PROJECT_ID, POSTHOG_ANALYTICS_API_KEY
+ */
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "posthog-mcp-hedyos",
+    "main": "src/index.ts",
+    "build": {
+        "command": "npx tsx scripts/copy-instructions.ts",
+        "watch_dir": "src",
+    },
+    "compatibility_date": "2025-03-10",
+    "compatibility_flags": ["nodejs_compat"],
+    "migrations": [
+        {
+            "new_sqlite_classes": ["MyMCP"],
+            "tag": "v1",
+        },
+        {
+            "renamed_classes": [
+                {
+                    "from": "MyMCP",
+                    "to": "MCP",
+                },
+            ],
+            "tag": "v2",
+        },
+    ],
+    "durable_objects": {
+        "bindings": [
+            {
+                "class_name": "MCP",
+                "name": "MCP_OBJECT",
+            },
+        ],
+    },
+    "observability": {
+        "enabled": true,
+        "logs": {
+            "enabled": true,
+            "head_sampling_rate": 1.0,
+            "persist": true,
+        },
+    },
+    "rules": [
+        {
+            "type": "Text",
+            "globs": ["**/*.md"],
+            "fallthrough": true,
+        },
+        {
+            "type": "Text",
+            "globs": ["src/static/**/*.html"],
+            "fallthrough": true,
+        },
+    ],
+}

@@ -17,17 +17,18 @@ interface TaskSelectorProps {
   cellIndex: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onNewTask?: () => void;
   onNewTerminal?: (cwd?: string) => void;
   onBrainrot?: () => void;
   children: ReactNode;
 }
 
+// Combobox sets a trigger-derived minWidth inline, so a utility class cannot override it.
+const CONTENT_STYLE = { minWidth: "240px" };
+
 export function TaskSelector({
   cellIndex,
   open,
   onOpenChange,
-  onNewTask,
   onNewTerminal,
   onBrainrot,
   children,
@@ -60,12 +61,8 @@ export function TaskSelector({
 
   const handleNewTask = useCallback(() => {
     handleOpenChange(false);
-    if (onNewTask) {
-      onNewTask();
-    } else {
-      openTaskInput();
-    }
-  }, [handleOpenChange, onNewTask]);
+    openTaskInput();
+  }, [handleOpenChange]);
 
   const handleNewTerminal = useCallback(() => {
     if (folders.length > 1) {
@@ -97,7 +94,7 @@ export function TaskSelector({
           side="bottom"
           align="center"
           sideOffset={4}
-          className="min-w-[240px]"
+          style={CONTENT_STYLE}
         >
           {({ filtered }) => (
             <>
@@ -134,7 +131,7 @@ export function TaskSelector({
           side="bottom"
           align="center"
           sideOffset={4}
-          className="min-w-[240px]"
+          style={CONTENT_STYLE}
         >
           {({ filtered, hasMore, moreCount }) => (
             <>

@@ -17,6 +17,8 @@ export const skillInfo = z.object({
   repoName: z.string().optional(),
   editable: z.boolean(),
   skillMdBytes: z.number(),
+  disableModelInvocation: z.boolean().optional(),
+  enabled: z.boolean().optional(),
 });
 
 export const listSkillsOutput = z.array(skillInfo);
@@ -42,7 +44,7 @@ export const readSkillFileInput = z.object({
 
 export const readSkillFileOutput = z.string().nullable();
 
-export const skillScope = z.enum(["user", "repo"]);
+const skillScope = z.enum(["user", "repo"]);
 
 export const createSkillInput = z.object({
   scope: skillScope,
@@ -59,6 +61,7 @@ export const saveSkillManifestInput = z.object({
   name: z.string(),
   description: z.string(),
   body: z.string(),
+  disableModelInvocation: z.boolean().optional(),
 });
 
 export const saveSkillFileInput = z.object({
@@ -82,11 +85,16 @@ export const deleteSkillInput = z.object({
   skillPath: z.string(),
 });
 
+export const setSkillEnabledInput = z.object({
+  skillPath: z.string(),
+  enabled: z.boolean(),
+});
+
 export const exportSkillInput = z.object({
   skillPath: z.string(),
 });
 
-export const exportedSkillFile = z.object({
+const exportedSkillFile = z.object({
   // Path relative to the skill directory, using "/" separators.
   path: z.string(),
   content: z.string(),
@@ -98,6 +106,7 @@ export const exportSkillOutput = z.object({
   description: z.string(),
   body: z.string(),
   files: z.array(exportedSkillFile),
+  disableModelInvocation: z.boolean().optional(),
   /** Files excluded from the export (binary or oversized). */
   skipped: z.array(z.string()),
 }) satisfies z.ZodType<SharedExportedSkill & { skipped: string[] }>;
@@ -112,6 +121,7 @@ export const installTeamSkillInput = z.object({
   description: z.string(),
   body: z.string(),
   files: z.array(exportedSkillFile),
+  disableModelInvocation: z.boolean().optional(),
   overwrite: z.boolean().optional(),
 }) satisfies z.ZodType<SharedExportedSkill & { overwrite?: boolean }>;
 
@@ -141,7 +151,6 @@ export type BundleLocalSkillInput = z.infer<typeof bundleLocalSkillInput>;
 export type BundleLocalSkillOutput = z.infer<typeof bundleLocalSkillOutput>;
 export type SkillBundleRef = z.infer<typeof bundleLocalSkillInput>;
 export type SkillInfo = z.infer<typeof skillInfo>;
-export type SkillScope = z.infer<typeof skillScope>;
 export type CreateSkillInput = z.infer<typeof createSkillInput>;
 export type SkillSource = z.infer<typeof skillSource>;
 export type SkillFileEntry = z.infer<typeof skillFileEntry>;

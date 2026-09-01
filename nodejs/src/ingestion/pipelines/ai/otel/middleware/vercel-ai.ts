@@ -1,4 +1,6 @@
 import { parseJSON } from '~/common/utils/json-parse'
+import { COSTED_AI_EVENT_TYPES } from '~/ingestion/common/ai-event-types'
+import { finiteNumberOrUndefined } from '~/ingestion/pipelines/ai/costs/cost-utils'
 import { mustAddReasoningCost } from '~/ingestion/pipelines/ai/costs/output-costs'
 import { PluginEvent } from '~/plugin-scaffold'
 
@@ -143,6 +145,29 @@ function promptToMessages(prompt: unknown): unknown[] | null {
     return null
 }
 
+// Vercel AI Gateway reports the real charged cost at
+// providerMetadata.gateway.cost, which the token-based estimate cannot match
+// under BYOK rates, discounts, or per-request fallback. The OTel attribute
+// arrives as a JSON string, but accept a parsed object too.
+function extractGatewayCost(providerMetadata: unknown): number | undefined {
+    let parsed = providerMetadata
+    if (typeof parsed === 'string') {
+        try {
+            parsed = parseJSON(parsed)
+        } catch {
+            return undefined
+        }
+    }
+    if (parsed === null || typeof parsed !== 'object') {
+        return undefined
+    }
+    const gateway = (parsed as Record<string, unknown>).gateway
+    if (gateway === null || typeof gateway !== 'object') {
+        return undefined
+    }
+    return finiteNumberOrUndefined((gateway as Record<string, unknown>).cost)
+}
+
 function numericValue(value: unknown): number | null {
     if (typeof value === 'number' && Number.isFinite(value)) {
         return value
@@ -212,6 +237,26 @@ function process(event: PluginEvent, next: () => void): void {
         props['gen_ai.output.messages'] = [{ role: 'assistant', content: text }]
     }
     delete props['ai.response.text']
+
+    // Legacy AI SDK telemetry sends the tool catalog as ai.prompt.tools, an
+    // array of individually stringified tool definitions. Parse each entry so
+    // $ai_tools ends up carrying objects, like the current
+    // gen_ai.tool.definitions attribute does.
+    if (props['ai.prompt.tools'] !== undefined && props['gen_ai.tool.definitions'] === undefined) {
+        const tools = props['ai.prompt.tools']
+        if (Array.isArray(tools)) {
+            props['gen_ai.tool.definitions'] = tools.map((tool) => {
+                if (typeof tool !== 'string') {
+                    return tool
+                }
+                try {
+                    return parseJSON(tool)
+                } catch {
+                    return tool
+                }
+            })
+        }
+    }
 
     // Promote groups before the generic mapper runs so it can parse the JSON value.
     const groupsMetadata = getAiContextValue(props, '$groups')
@@ -333,6 +378,18 @@ function process(event: PluginEvent, next: () => void): void {
     }
     delete props['ai.response.finishReason']
     delete props['gen_ai.response.finish_reasons']
+
+    // The gateway reports only a total with no input/output split, so flag
+    // passthrough to stop the pipeline estimating one. The AI SDK records the same
+    // providerMetadata on the parent ai.generateText and ai.streamText spans, which
+    // are not costed events, so the gate keeps the cost on the generation.
+    if (COSTED_AI_EVENT_TYPES.has(event.event) && props['$ai_total_cost_usd'] === undefined) {
+        const gatewayCost = extractGatewayCost(props['ai.response.providerMetadata'])
+        if (gatewayCost !== undefined) {
+            props['$ai_total_cost_usd'] = gatewayCost
+            props['$ai_cost_passthrough'] = true
+        }
+    }
 
     if (eveSpan) {
         const eveSessionId = props['eve.session.id']

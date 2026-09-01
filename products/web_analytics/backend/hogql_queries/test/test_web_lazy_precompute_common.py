@@ -1,9 +1,11 @@
 from datetime import UTC, datetime
 
+from freezegun import freeze_time
 from posthog.test.base import APIBaseTest, BaseTest, ClickhouseTestMixin
 from unittest import mock
 
 from django.test import override_settings
+from django.utils import timezone as django_timezone
 
 from parameterized import parameterized
 from structlog.contextvars import get_contextvars
@@ -39,6 +41,7 @@ from products.web_analytics.backend.hogql_queries.web_lazy_precompute_common imp
     SESSION_SETTLING_SECONDS,
     STALE_WHILE_REVALIDATE_SECONDS,
     TEAM_SHAPE_SET_TTL_SECONDS,
+    DateRangeOverMax,
     PerQueryOptedOut,
     PropertyAccessControlled,
     UnsupportedFilterType,
@@ -51,6 +54,8 @@ from products.web_analytics.backend.hogql_queries.web_lazy_precompute_common imp
     host_filter_expr,
     is_precompute_enabled_for_team,
     is_team_oom_pinned,
+    lazy_precompute_ineligible_reason,
+    log_eligibility_outcome,
     pin_team_oom,
     try_reserve_precompute_shape,
     web_ensure_precomputed,
@@ -158,6 +163,19 @@ class TestCheckCommonEligibility(BaseTest):
         with override_settings(WEB_ANALYTICS_LAZY_PRECOMPUTE_TEAM_IDS=[self.team.pk]):
             with self.assertRaises(PropertyAccessControlled):
                 self._check(use_precompute=None)
+
+
+class TestEligibilityReasonTagging(BaseTest):
+    def setUp(self) -> None:
+        super().setUp()
+        reset_query_tags()
+
+    def test_rejection_reason_is_tagged_then_cleared_once_a_gate_admits(self) -> None:
+        log_eligibility_outcome(log_prefix="web_goals", team_id=self.team.pk, error=DateRangeOverMax(120))
+        assert lazy_precompute_ineligible_reason() == "DateRangeOverMax"
+
+        log_eligibility_outcome(log_prefix="web_goals", team_id=self.team.pk, error=None)
+        assert lazy_precompute_ineligible_reason() is None
 
 
 class TestCacheKeyVariesWithRolloutState(BaseTest):
@@ -562,6 +580,80 @@ class TestWebEnsurePrecomputed(BaseTest):
         with tags_context(execution_mode=execution_mode):
             web_ensure_precomputed(team=self.team, ttl_seconds={"default": 3600}, table=None)
         assert mock_ensure.call_args.kwargs["stale_while_revalidate_seconds"] == expected_grace
+
+    @parameterized.expand(
+        [
+            # A fresh-enough current-day bucket is still hours coarse (today band
+            # is 4h), which an hourly graph renders as missing recent data. On a
+            # forced refresh the current day must read as expired so the request
+            # falls through to the live query instead of the coarse bucket.
+            ("forced", ExecutionMode.CALCULATE_BLOCKING_ALWAYS.value, None, True),
+            # The SWR revalidation task also runs under the forced execution mode,
+            # and on background triggers the schedule sets the insert TTL too. The
+            # override must not apply there, or the rebuilt current-day bucket
+            # persists with a 1-second expiry that every ambient read misses.
+            ("forced_background", ExecutionMode.CALCULATE_BLOCKING_ALWAYS.value, REVALIDATION_TRIGGER, False),
+            ("not_forced", ExecutionMode.RECENT_CACHE_CALCULATE_BLOCKING_IF_STALE.value, None, False),
+        ]
+    )
+    @mock.patch(f"{_COMMON}.ensure_precomputed")
+    def test_forced_refresh_expires_current_day_band(
+        self, _name, execution_mode, trigger, expect_override, mock_ensure
+    ):
+        mock_ensure.return_value = LazyComputationResult(ready=True, job_ids=[])
+        reset_query_tags()
+        tags = {"execution_mode": execution_mode}
+        if trigger is not None:
+            tags["trigger"] = trigger
+        with tags_context(**tags):
+            web_ensure_precomputed(team=self.team, ttl_seconds={"0d": 4 * 3600, "default": 3600}, table=None)
+        schedule = mock_ensure.call_args.kwargs["ttl_seconds"]
+        first_cutoff, first_ttl = schedule.rules[0]
+        if expect_override:
+            assert first_ttl == 1
+            assert first_cutoff.hour == 0 and first_cutoff.minute == 0
+            assert schedule.get_ttl(django_timezone.now()) == 1
+        else:
+            assert first_ttl == 4 * 3600
+            assert schedule.get_ttl(django_timezone.now()) == 4 * 3600
+
+    @parameterized.expand(
+        [
+            # Jobs split on UTC day boundaries. For a team behind UTC the
+            # current-day window starts before local midnight, and for a team
+            # ahead of UTC the local morning lives in the previous UTC window;
+            # a cutoff at local midnight itself misses those windows and Reload
+            # keeps serving the coarse bucket.
+            (
+                "behind_utc",
+                "America/Sao_Paulo",
+                [datetime(2026, 8, 20, tzinfo=UTC)],
+                datetime(2026, 8, 19, tzinfo=UTC),
+            ),
+            (
+                "ahead_of_utc",
+                "Asia/Tokyo",
+                [datetime(2026, 8, 19, tzinfo=UTC), datetime(2026, 8, 20, tzinfo=UTC)],
+                datetime(2026, 8, 18, tzinfo=UTC),
+            ),
+        ]
+    )
+    @mock.patch(f"{_COMMON}.ensure_precomputed")
+    def test_forced_cutoff_expires_utc_windows_overlapping_local_day(
+        self, _name, tz, expired_window_starts, fresh_window_start, mock_ensure
+    ):
+        mock_ensure.return_value = LazyComputationResult(ready=True, job_ids=[])
+        reset_query_tags()
+        self.team.timezone = tz
+        with (
+            freeze_time("2026-08-20T12:00:00Z"),
+            tags_context(execution_mode=ExecutionMode.CALCULATE_BLOCKING_ALWAYS.value),
+        ):
+            web_ensure_precomputed(team=self.team, ttl_seconds={"0d": 4 * 3600, "default": 3600}, table=None)
+        schedule = mock_ensure.call_args.kwargs["ttl_seconds"]
+        for window_start in expired_window_starts:
+            assert schedule.get_ttl(window_start) == 1
+        assert schedule.get_ttl(fresh_window_start) == 3600
 
 
 class TestStaleRevalidationEnqueue(BaseTest):

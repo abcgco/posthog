@@ -14,6 +14,7 @@ import type { ContentBlock } from "@agentclientprotocol/sdk";
 import type { Adapter } from "@posthog/shared";
 import { zipSync } from "fflate";
 import jwt from "jsonwebtoken";
+import { HttpResponse, http } from "msw";
 import { type SetupServerApi, setupServer } from "msw/node";
 import {
   afterAll,
@@ -41,6 +42,7 @@ import type { StoredEntry, TaskRun } from "../types";
 import {
   AgentServer,
   isTurnCompleteNotification,
+  PREWARMED_RESUME_IDLE_CAPABILITY,
   SSE_KEEPALIVE_INTERVAL_MS,
 } from "./agent-server";
 import { type JwtPayload, SANDBOX_CONNECTION_AUDIENCE } from "./jwt";
@@ -227,6 +229,8 @@ interface TestableServer {
     run: TaskRun | null,
   ): Promise<void>;
   detectedPrUrl: string | null;
+  slackArtifactDelivery: "none" | "message" | "canvas_file" | null;
+  slackChartDelivery: boolean;
   buildCloudSystemPrompt(
     prUrl?: string | null,
     slackThreadUrl?: string | null,
@@ -542,9 +546,78 @@ describe("AgentServer HTTP Mode", () => {
       expect(body).toEqual({
         status: "ok",
         hasSession: true,
+        readiness: "ready",
         bootMs: expect.any(Number),
         sessionInitMs: expect.any(Number),
+        boot: expect.objectContaining({
+          contractVersion: 1,
+          bootId: "test-run-id",
+          state: "ready",
+          totalMs: expect.any(Number),
+          phasesMs: expect.any(Object),
+        }),
+        capabilities: [PREWARMED_RESUME_IDLE_CAPABILITY],
       });
+    }, 30000);
+
+    it("enables repository tools for a repository-less cloud session", async () => {
+      await mkdir("/tmp/workspace", { recursive: true });
+      mswServer.use(
+        http.get(
+          "http://localhost:8000/api/projects/:projectId/tasks/:taskId/",
+          () =>
+            HttpResponse.json({
+              id: "test-task-id",
+              title: "Test task",
+              description: null,
+              origin_product: "user_created",
+              repository: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            }),
+        ),
+      );
+
+      const testServer = createServer({
+        repositoryPath: undefined,
+      }) as unknown as {
+        start(): Promise<void>;
+        session: { sessionMeta: { channelMode?: boolean } } | null;
+      };
+      await testServer.start();
+
+      expect(testServer.session?.sessionMeta.channelMode).toBe(true);
+    }, 30000);
+
+    // A task pinned to a repository gets its checkout provisioned; handing it
+    // clone tools would be wrong even though it has no repositoryPath.
+    it("keeps repository tools disabled when the task carries a repository", async () => {
+      await mkdir("/tmp/workspace", { recursive: true });
+      mswServer.use(
+        http.get(
+          "http://localhost:8000/api/projects/:projectId/tasks/:taskId/",
+          () =>
+            HttpResponse.json({
+              id: "test-task-id",
+              title: "Test task",
+              description: null,
+              origin_product: "user_created",
+              repository: "PostHog/posthog",
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            }),
+        ),
+      );
+
+      const testServer = createServer({
+        repositoryPath: undefined,
+      }) as unknown as {
+        start(): Promise<void>;
+        session: { sessionMeta: { channelMode?: boolean } } | null;
+      };
+      await testServer.start();
+
+      expect(testServer.session?.sessionMeta.channelMode).toBeUndefined();
     }, 30000);
 
     it("links native agent state before initializing the session", async () => {
@@ -613,7 +686,6 @@ describe("AgentServer HTTP Mode", () => {
       };
       cleanupServer.session = {
         payload: { run_id: "run-1" },
-        pendingHandoffGitState: undefined,
         logWriter: { flush: vi.fn(async () => {}) },
         acpConnection: { cleanup: vi.fn(async () => {}) },
         sseController: { close: vi.fn() },
@@ -1214,6 +1286,29 @@ describe("AgentServer HTTP Mode", () => {
       },
     );
 
+    it("quietly ends an interactive follow-up when its idle ACP transport closed", async () => {
+      const testServer = createFailureTestServer();
+
+      await testServer.handleTurnFailure(
+        interactivePayload,
+        "followup",
+        new Error("ACP connection closed"),
+      );
+
+      expect(testServer.eventStreamSender.enqueue).toHaveBeenCalledTimes(1);
+      expect(testServer.eventStreamSender.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({
+          notification: expect.objectContaining({
+            method: "_posthog/turn_complete",
+            params: expect.objectContaining({
+              stopReason: "error_recoverable",
+            }),
+          }),
+        }),
+      );
+      expect(testServer.posthogAPI.updateTaskRun).not.toHaveBeenCalled();
+    });
+
     function createRetryTestServer(prompt: ReturnType<typeof vi.fn>) {
       const testServer = createFailureTestServer();
       testServer.session = {
@@ -1223,6 +1318,7 @@ describe("AgentServer HTTP Mode", () => {
         clientConnection: { prompt },
       };
       return testServer as unknown as {
+        eventStreamSender: { enqueue: ReturnType<typeof vi.fn> };
         promptWithUpstreamRetry(request: {
           sessionId: string;
           prompt: ContentBlock[];
@@ -1257,6 +1353,13 @@ describe("AgentServer HTTP Mode", () => {
         expect(retryRequest.prompt[0].text).toContain(
           "interrupted by a transient connection error",
         );
+        const dispatchEvents =
+          testServer.eventStreamSender.enqueue.mock.calls.filter(
+            ([event]) =>
+              (event as { notification?: { method?: string } }).notification
+                ?.method === POSTHOG_NOTIFICATIONS.COMMAND_DISPATCHED,
+          );
+        expect(dispatchEvents).toHaveLength(1);
       } finally {
         vi.useRealTimers();
       }
@@ -1472,7 +1575,10 @@ describe("AgentServer HTTP Mode", () => {
     function exposeCloudClient(testServer: AgentServer) {
       return testServer as unknown as {
         config: { relayMcpServers?: string[]; mode?: string };
-        session: { hasDesktopConnected?: boolean } | null;
+        session: {
+          hasDesktopConnected?: boolean;
+          permissionMode?: PermissionMode;
+        } | null;
         eventStreamSender: unknown;
         relayPermissionToClient: (params: unknown) => Promise<unknown>;
         pendingPermissions: Map<string, unknown>;
@@ -1610,6 +1716,30 @@ describe("AgentServer HTTP Mode", () => {
       expect(relaySpy).toHaveBeenCalledOnce();
     });
 
+    // Codex registers servers under sanitized keys (its name pattern rejects
+    // e.g. spaces) and suffixes collisions, so the always-ask gate must match
+    // both forms; missing the suffixed one auto-runs a relayed local tool.
+    it.each([["My_Slack"], ["My_Slack_2"]])(
+      "relays a codex tool call for a relayed server reported as %j",
+      async (reportedKey) => {
+        const testServer = exposeCloudClient(createServer());
+        testServer.config.relayMcpServers = ["My Slack"];
+        testServer.session = { hasDesktopConnected: true };
+        const relaySpy = vi
+          .spyOn(testServer, "relayPermissionToClient")
+          .mockResolvedValue({
+            outcome: { outcome: "selected", optionId: "allow_once" },
+          });
+
+        const { requestPermission } = testServer.createCloudClient(basePayload);
+        await requestPermission(
+          codexPermissionRequestFor(reportedKey, "send_message"),
+        );
+
+        expect(relaySpy).toHaveBeenCalledOnce();
+      },
+    );
+
     it("denies a relayed-server tool call instead of auto-approving when no client is reachable", async () => {
       const testServer = exposeCloudClient(createServer());
       testServer.config.relayMcpServers = ["slack"];
@@ -1696,6 +1826,37 @@ describe("AgentServer HTTP Mode", () => {
       expect(relaySpy).not.toHaveBeenCalled();
       expect(result.outcome).toEqual({ outcome: "cancelled" });
     });
+
+    it.each([
+      { runtimeAdapter: "codex" as Adapter, relayed: false },
+      { runtimeAdapter: "claude" as Adapter, relayed: true },
+    ])(
+      "auto mode relays an edit approval on $runtimeAdapter: $relayed",
+      async ({ runtimeAdapter, relayed }) => {
+        const testServer = exposeCloudClient(createServer({ runtimeAdapter }));
+        testServer.session = {
+          hasDesktopConnected: true,
+          permissionMode: "auto",
+        };
+        const relaySpy = vi
+          .spyOn(testServer, "relayPermissionToClient")
+          .mockResolvedValue({
+            outcome: { outcome: "selected", optionId: "allow_once" },
+          });
+
+        const { requestPermission } = testServer.createCloudClient(basePayload);
+        const result = await requestPermission({
+          options: [{ optionId: "allow_once", kind: "allow_once" }],
+          toolCall: { kind: "edit", toolCallId: "tc-1" },
+        });
+
+        expect(relaySpy).toHaveBeenCalledTimes(relayed ? 1 : 0);
+        expect(result.outcome).toEqual({
+          outcome: "selected",
+          optionId: "allow_once",
+        });
+      },
+    );
 
     it.each([
       {
@@ -1900,6 +2061,34 @@ describe("AgentServer HTTP Mode", () => {
 
       // Detach the fake session so afterEach's stop() short-circuits before
       // touching the partial session/relay stubs.
+      testServer.session = null;
+    });
+
+    it("strips pi-only descriptions before forwarding to the ACP adapter", async () => {
+      // claude and codex validate session params against the ACP schema, which does not
+      // declare a server description; only pi reads it.
+      const testServer = exposeRefresh(createServer());
+      const extMethod = vi.fn(async () => ({ refreshed: true }));
+      testServer.session = { clientConnection: { extMethod } };
+      testServer.mcpRelayServer = null;
+
+      await testServer.executeCommand("refresh_session", {
+        mcpServers: [
+          {
+            type: "http",
+            name: "posthog",
+            url: "https://mcp",
+            headers: [],
+            description: "Query PostHog insights and dashboards.",
+          },
+        ],
+      });
+
+      const forwarded = (extMethod.mock.calls[0] as unknown[])[1] as {
+        mcpServers: Array<Record<string, unknown>>;
+      };
+      expect(forwarded.mcpServers[0]).not.toHaveProperty("description");
+
       testServer.session = null;
     });
 
@@ -2692,6 +2881,136 @@ describe("AgentServer HTTP Mode", () => {
       expect(resetTurnMessages).not.toHaveBeenCalled();
     }, 20000);
 
+    it("declines steering while an initial or resume turn is starting", async () => {
+      const s = createServer();
+      await s.start();
+      const prompt = vi.fn();
+      const serverInternals = s as unknown as {
+        activeOwnedTurnCount: number;
+        activeStartupTurnCount: number;
+        session: { clientConnection: { prompt: typeof prompt } };
+      };
+      serverInternals.activeOwnedTurnCount = 1;
+      serverInternals.activeStartupTurnCount = 1;
+      serverInternals.session.clientConnection.prompt = prompt;
+
+      const response = await fetch(`http://localhost:${port}/command`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${createToken()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "steer-during-resume",
+          method: "user_message",
+          params: {
+            content: "status?",
+            messageId: "steer-during-resume",
+            steer: true,
+          },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        result: {
+          stopReason: "steer_declined",
+          steered: false,
+          reason: "startup_turn",
+        },
+      });
+      expect(prompt).not.toHaveBeenCalled();
+    }, 20000);
+
+    it("declines steering when the sandbox has no turn to fold it into", async () => {
+      const s = createServer();
+      await s.start();
+      const prompt = vi.fn();
+      const serverInternals = s as unknown as {
+        session: { clientConnection: { prompt: typeof prompt } };
+      };
+      serverInternals.session.clientConnection.prompt = prompt;
+
+      const response = await fetch(`http://localhost:${port}/command`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${createToken()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "steer-while-idle",
+          method: "user_message",
+          params: {
+            content: "status?",
+            messageId: "steer-while-idle",
+            steer: true,
+          },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        result: {
+          stopReason: "steer_declined",
+          steered: false,
+          reason: "no_active_turn",
+        },
+      });
+      expect(prompt).not.toHaveBeenCalled();
+    }, 20000);
+
+    it("declines steering while a prewarmed first turn is starting", async () => {
+      const s = createServer();
+      await s.start();
+      let finishTurn!: (result: { stopReason: "end_turn" }) => void;
+      const prompt = vi.fn(
+        () =>
+          new Promise<{ stopReason: "end_turn" }>((resolve) => {
+            finishTurn = resolve;
+          }),
+      );
+      const serverInternals = s as unknown as {
+        prewarmedStartupTurnPending: boolean;
+        session: { clientConnection: { prompt: typeof prompt } };
+      };
+      serverInternals.prewarmedStartupTurnPending = true;
+      serverInternals.session.clientConnection.prompt = prompt;
+
+      const token = createToken();
+      const send = (id: string, steer = false) =>
+        fetch(`http://localhost:${port}/command`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "user_message",
+            params: { content: id, messageId: id, ...(steer && { steer }) },
+          }),
+        });
+
+      const firstTurn = send("first-turn");
+      await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+
+      const steerResponse = await send("steer-during-first-turn", true);
+      await expect(steerResponse.json()).resolves.toMatchObject({
+        result: {
+          stopReason: "steer_declined",
+          steered: false,
+          reason: "startup_turn",
+        },
+      });
+      expect(prompt).toHaveBeenCalledOnce();
+
+      finishTurn({ stopReason: "end_turn" });
+      await firstTurn;
+    }, 20000);
+
     it("does not queue steering behind an active non-steering turn", async () => {
       const s = createServer();
       await s.start();
@@ -2745,56 +3064,67 @@ describe("AgentServer HTTP Mode", () => {
       await activeTurn;
     }, 20000);
 
-    it("declines steering without blocking on a fallback normal turn", async () => {
-      const s = createServer();
-      await s.start();
-      const prompt = vi.fn();
-      const broadcastTurnComplete = vi.fn();
-      const resetTurnMessages = vi.fn();
-      const serverInternals = s as unknown as {
-        activeOwnedTurnCount: number;
-        broadcastTurnComplete: typeof broadcastTurnComplete;
-        session: {
-          clientConnection: { prompt: typeof prompt };
-          logWriter: { resetTurnMessages: typeof resetTurnMessages };
+    it.each([
+      [{ steer: false }, "adapter_rejected"],
+      [{ steer: false, steerDeclineCause: "compacting" }, "adapter_compacting"],
+    ])(
+      "declines steering without blocking on a fallback normal turn (%o)",
+      async (adapterMeta, expectedReason) => {
+        const s = createServer();
+        await s.start();
+        const prompt = vi.fn();
+        const broadcastTurnComplete = vi.fn();
+        const resetTurnMessages = vi.fn();
+        const serverInternals = s as unknown as {
+          activeOwnedTurnCount: number;
+          broadcastTurnComplete: typeof broadcastTurnComplete;
+          session: {
+            clientConnection: { prompt: typeof prompt };
+            logWriter: { resetTurnMessages: typeof resetTurnMessages };
+          };
         };
-      };
-      serverInternals.activeOwnedTurnCount = 1;
-      prompt.mockImplementationOnce(async () => {
-        serverInternals.activeOwnedTurnCount = 0;
-        return { stopReason: "end_turn", _meta: { steer: false } };
-      });
-      serverInternals.broadcastTurnComplete = broadcastTurnComplete;
-      serverInternals.session.clientConnection.prompt = prompt;
-      serverInternals.session.logWriter.resetTurnMessages = resetTurnMessages;
+        serverInternals.activeOwnedTurnCount = 1;
+        prompt.mockImplementationOnce(async () => {
+          serverInternals.activeOwnedTurnCount = 0;
+          return { stopReason: "end_turn", _meta: adapterMeta };
+        });
+        serverInternals.broadcastTurnComplete = broadcastTurnComplete;
+        serverInternals.session.clientConnection.prompt = prompt;
+        serverInternals.session.logWriter.resetTurnMessages = resetTurnMessages;
 
-      const response = await fetch(`http://localhost:${port}/command`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${createToken()}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "steer-race",
-          method: "user_message",
-          params: { content: "continue normally", steer: true },
-        }),
-      });
+        const response = await fetch(`http://localhost:${port}/command`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${createToken()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "steer-race",
+            method: "user_message",
+            params: { content: "continue normally", steer: true },
+          }),
+        });
 
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toMatchObject({
-        result: { stopReason: "steer_declined", steered: false },
-      });
-      expect(prompt).toHaveBeenCalledTimes(1);
-      expect(prompt.mock.calls[0]?.[0]).toEqual(
-        expect.objectContaining({
-          _meta: expect.objectContaining({ steer: true }),
-        }),
-      );
-      expect(resetTurnMessages).not.toHaveBeenCalled();
-      expect(broadcastTurnComplete).not.toHaveBeenCalled();
-    }, 20000);
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toMatchObject({
+          result: {
+            stopReason: "steer_declined",
+            steered: false,
+            reason: expectedReason,
+          },
+        });
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(prompt.mock.calls[0]?.[0]).toEqual(
+          expect.objectContaining({
+            _meta: expect.objectContaining({ steer: true }),
+          }),
+        );
+        expect(resetTurnMessages).not.toHaveBeenCalled();
+        expect(broadcastTurnComplete).not.toHaveBeenCalled();
+      },
+      20000,
+    );
 
     it("redelivers a messageId whose first delivery failed before producing a turn", async () => {
       const s = createServer();
@@ -3290,6 +3620,417 @@ describe("AgentServer HTTP Mode", () => {
   });
 
   describe("resume prompt display", () => {
+    it.each(["native", "summary"] as const)(
+      "keeps a prewarmed %s resume idle until the forwarded user message arrives",
+      async (resumeKind) => {
+        const s = createServer();
+        await s.start();
+
+        const prompt = vi.fn(async () => ({ stopReason: "cancelled" }));
+        const payload: JwtPayload = {
+          run_id: "test-run-id",
+          task_id: "test-task-id",
+          team_id: 1,
+          user_id: 1,
+          distinct_id: "test-distinct-id",
+          mode: "interactive",
+        };
+        const taskRun = createTaskRun({
+          id: "test-run-id",
+          task: "test-task-id",
+          state: {
+            prewarmed: true,
+            await_user_message: true,
+            resume_from_run_id: "previous-run",
+          },
+        });
+        const internals = s as unknown as {
+          posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
+          session: { clientConnection: { prompt: typeof prompt } };
+          resumeState: ResumeState | null;
+          nativeResume: { sessionId: string; warm: boolean } | null;
+          prewarmedRun: boolean;
+          prewarmedStartupTurnPending: boolean;
+          eventStreamSender: {
+            enqueue: ReturnType<typeof vi.fn>;
+            stop: ReturnType<typeof vi.fn>;
+          };
+          sendInitialTaskMessage(
+            payload: JwtPayload,
+            taskRun: TaskRun | null,
+          ): Promise<void>;
+        };
+        internals.session.clientConnection.prompt = prompt;
+        internals.prewarmedRun = true;
+        internals.prewarmedStartupTurnPending = true;
+        internals.eventStreamSender = {
+          enqueue: vi.fn(),
+          stop: vi.fn(async () => {}),
+        };
+        internals.resumeState = {
+          conversation: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "original request" }],
+            },
+            {
+              role: "assistant",
+              content: [{ type: "text", text: "work completed so far" }],
+            },
+          ],
+          interrupted: false,
+          logEntryCount: 2,
+          sessionId: "prior-session",
+        };
+        internals.nativeResume =
+          resumeKind === "native"
+            ? { sessionId: "prior-session", warm: true }
+            : null;
+        vi.spyOn(internals.posthogAPI, "getTaskRun").mockResolvedValue(taskRun);
+
+        await internals.sendInitialTaskMessage(payload, taskRun);
+
+        expect(prompt).not.toHaveBeenCalled();
+        expect(internals.resumeState).not.toBeNull();
+
+        const response = await fetch(`http://localhost:${port}/command`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${createToken()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: `deferred-${resumeKind}`,
+            method: "user_message",
+            params: { content: "continue with this change" },
+          }),
+        });
+
+        expect(response.status).toBe(200);
+        expect(prompt).toHaveBeenCalledOnce();
+        expect(
+          internals.eventStreamSender.enqueue.mock.calls.filter(
+            ([event]) =>
+              (event as { notification?: { method?: string } }).notification
+                ?.method === POSTHOG_NOTIFICATIONS.COMMAND_DISPATCHED,
+          ),
+        ).toHaveLength(1);
+        const [{ prompt: promptBlocks }] = prompt.mock.calls[0] as unknown as [
+          { prompt: ContentBlock[] },
+        ];
+        const visibleText = promptBlocks
+          .filter(
+            (block) =>
+              block.type === "text" &&
+              !(
+                (block as { _meta?: { ui?: { hidden?: boolean } } })._meta?.ui
+                  ?.hidden === true
+              ),
+          )
+          .map((block) => (block as { text: string }).text);
+        expect(visibleText).toEqual(["continue with this change"]);
+        if (resumeKind === "summary") {
+          expect(promptBlocks).toHaveLength(3);
+          expect((promptBlocks[0] as { text: string }).text).toContain(
+            "work completed so far",
+          );
+        } else {
+          expect(promptBlocks).toHaveLength(1);
+        }
+        expect(internals.resumeState).toBeNull();
+        expect(internals.nativeResume).toBeNull();
+      },
+      30000,
+    );
+
+    it("resumes instead of idling once the run is no longer awaiting its first message", async () => {
+      // `prewarmed` outlives activation; `await_user_message` is what the backend clears. Idling on
+      // provenance alone strands every reinitialization of an activated run, waiting for a first
+      // message that was already delivered.
+      const s = createServer();
+      await s.start();
+
+      const prompt = vi.fn(async () => ({ stopReason: "end_turn" }));
+      const payload: JwtPayload = {
+        run_id: "test-run-id",
+        task_id: "test-task-id",
+        team_id: 1,
+        user_id: 1,
+        distinct_id: "test-distinct-id",
+        mode: "interactive",
+      };
+      const taskRun = createTaskRun({
+        id: "test-run-id",
+        task: "test-task-id",
+        state: { prewarmed: true, resume_from_run_id: "previous-run" },
+      });
+      const internals = s as unknown as {
+        posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
+        session: { clientConnection: { prompt: typeof prompt } };
+        resumeState: ResumeState | null;
+        nativeResume: { sessionId: string; warm: boolean } | null;
+        prewarmedRun: boolean;
+        sendInitialTaskMessage(
+          payload: JwtPayload,
+          taskRun: TaskRun | null,
+        ): Promise<void>;
+      };
+      internals.session.clientConnection.prompt = prompt;
+      internals.nativeResume = null;
+      internals.resumeState = {
+        conversation: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "original request" }],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "work completed so far" }],
+          },
+        ],
+        interrupted: false,
+        logEntryCount: 2,
+        sessionId: "prior-session",
+      };
+      vi.spyOn(internals.posthogAPI, "getTaskRun").mockResolvedValue(taskRun);
+
+      await internals.sendInitialTaskMessage(payload, taskRun);
+
+      expect(internals.prewarmedRun).toBe(false);
+      expect(prompt).toHaveBeenCalledOnce();
+    }, 30000);
+
+    it("loads the summary fallback before a prewarmed run idles", async () => {
+      // Initialization may fail to fetch the run `prepareNativeResume` needed. If the fallback load
+      // is skipped on the way to idling, the forwarded first message starts the resumed task with
+      // none of its prior conversation, and nothing reports an error.
+      const s = createServer();
+      await s.start();
+
+      const payload: JwtPayload = {
+        run_id: "test-run-id",
+        task_id: "test-task-id",
+        team_id: 1,
+        user_id: 1,
+        distinct_id: "test-distinct-id",
+        mode: "interactive",
+      };
+      const taskRun = createTaskRun({
+        id: "test-run-id",
+        task: "test-task-id",
+        state: {
+          prewarmed: true,
+          await_user_message: true,
+          resume_from_run_id: "previous-run",
+        },
+      });
+      const internals = s as unknown as {
+        posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
+        resumeState: ResumeState | null;
+        nativeResume: { sessionId: string; warm: boolean } | null;
+        prewarmedRun: boolean;
+        loadResumeState(
+          taskId: string,
+          resumeRunId: string,
+          currentRunId: string,
+        ): Promise<void>;
+        sendInitialTaskMessage(
+          payload: JwtPayload,
+          taskRun: TaskRun | null,
+        ): Promise<void>;
+      };
+      internals.nativeResume = null;
+      internals.resumeState = null;
+      vi.spyOn(internals.posthogAPI, "getTaskRun").mockResolvedValue(taskRun);
+      const loadResumeState = vi
+        .spyOn(internals, "loadResumeState")
+        .mockImplementation(async () => {
+          internals.resumeState = {
+            conversation: [
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "work completed so far" }],
+              },
+            ],
+            interrupted: false,
+            logEntryCount: 1,
+            sessionId: "prior-session",
+          };
+        });
+
+      await internals.sendInitialTaskMessage(payload, taskRun);
+
+      expect(loadResumeState).toHaveBeenCalledWith(
+        "test-task-id",
+        "previous-run",
+        "test-run-id",
+      );
+      expect(internals.prewarmedRun).toBe(true);
+      expect(internals.resumeState).not.toBeNull();
+    }, 30000);
+
+    it("still continues after /compact sent as the first forwarded message", async () => {
+      // A summary resume prepends a hidden history block. Reading the slash command off the wrapped
+      // prompt stops recognizing `/compact`, so the run reports complete instead of carrying on with
+      // the user's compact instruction.
+      const s = createServer();
+      await s.start();
+
+      const prompt = vi.fn(async () => ({ stopReason: "end_turn" }));
+      const _payload: JwtPayload = {
+        run_id: "test-run-id",
+        task_id: "test-task-id",
+        team_id: 1,
+        user_id: 1,
+        distinct_id: "test-distinct-id",
+        mode: "interactive",
+      };
+      const taskRun = createTaskRun({
+        id: "test-run-id",
+        task: "test-task-id",
+        state: {
+          prewarmed: true,
+          await_user_message: true,
+          resume_from_run_id: "previous-run",
+        },
+      });
+      const internals = s as unknown as {
+        posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
+        session: { clientConnection: { prompt: typeof prompt } };
+        resumeState: ResumeState | null;
+        nativeResume: { sessionId: string; warm: boolean } | null;
+        prewarmedRun: boolean;
+      };
+      internals.session.clientConnection.prompt = prompt;
+      internals.prewarmedRun = true;
+      internals.nativeResume = null;
+      internals.resumeState = {
+        conversation: [
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "work completed so far" }],
+          },
+        ],
+        interrupted: false,
+        logEntryCount: 1,
+        sessionId: "prior-session",
+      };
+      vi.spyOn(internals.posthogAPI, "getTaskRun").mockResolvedValue(taskRun);
+
+      const response = await fetch(`http://localhost:${port}/command`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${createToken()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "deferred-compact",
+          method: "user_message",
+          params: { content: "/compact keep the auth work" },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(prompt).toHaveBeenCalledTimes(2);
+      const [, secondCall] = prompt.mock.calls as unknown as [
+        unknown,
+        [{ prompt: ContentBlock[] }],
+      ];
+      expect((secondCall[0].prompt[0] as { text: string }).text).toContain(
+        "Compaction is complete",
+      );
+    }, 30000);
+
+    it("retries an oversized deferred native resume on a fresh session", async () => {
+      // `sendResumeContinuation` gets this through `runResumeTurn`'s retryOnOversizedPrompt, but a
+      // prewarmed run defers its resume onto the first forwarded message and never takes that path.
+      // Without a fallback the run just fails when the replayed transcript overflows the window.
+      const s = createServer();
+      await s.start();
+
+      const prompt = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("API Error: 413 prompt is too long"))
+        .mockResolvedValue({ stopReason: "end_turn" });
+      const newSession = vi.fn(async () => ({ sessionId: "fresh-session" }));
+      const _payload: JwtPayload = {
+        run_id: "test-run-id",
+        task_id: "test-task-id",
+        team_id: 1,
+        user_id: 1,
+        distinct_id: "test-distinct-id",
+        mode: "interactive",
+      };
+      const taskRun = createTaskRun({
+        id: "test-run-id",
+        task: "test-task-id",
+        state: {
+          prewarmed: true,
+          await_user_message: true,
+          resume_from_run_id: "previous-run",
+        },
+      });
+      const internals = s as unknown as {
+        posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
+        session: {
+          clientConnection: {
+            prompt: typeof prompt;
+            newSession: typeof newSession;
+          };
+        };
+        resumeState: ResumeState | null;
+        nativeResume: { sessionId: string; warm: boolean } | null;
+        prewarmedRun: boolean;
+      };
+      internals.session.clientConnection.prompt = prompt;
+      internals.session.clientConnection.newSession = newSession;
+      internals.prewarmedRun = true;
+      internals.nativeResume = { sessionId: "prior-session", warm: true };
+      internals.resumeState = {
+        conversation: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "original request" }],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "text", text: "work completed so far" }],
+          },
+        ],
+        interrupted: false,
+        logEntryCount: 2,
+        sessionId: "prior-session",
+      };
+      vi.spyOn(internals.posthogAPI, "getTaskRun").mockResolvedValue(taskRun);
+
+      const response = await fetch(`http://localhost:${port}/command`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${createToken()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "deferred-oversized",
+          method: "user_message",
+          params: { content: "continue with this change" },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(newSession).toHaveBeenCalledOnce();
+      expect(prompt).toHaveBeenCalledTimes(2);
+      const [, secondCall] = prompt.mock.calls as unknown as [
+        unknown,
+        [{ prompt: ContentBlock[] }],
+      ];
+      expect((secondCall[0].prompt[0] as { text: string }).text).toContain(
+        "work completed so far",
+      );
+    }, 30000);
+
     it("hides synthetic resume context while keeping the pending user message visible", async () => {
       const s = createServer() as unknown as {
         resumeState: ResumeState | null;
@@ -3345,23 +4086,29 @@ describe("AgentServer HTTP Mode", () => {
             content: [{ type: "text", text: "old answer" }],
           },
         ],
-        latestGitCheckpoint: null,
         interrupted: false,
         logEntryCount: 2,
         sessionId: "prior-session",
       };
 
-      await s.sendResumeMessage(
-        payload,
-        createTaskRun({
-          id: "test-run-id",
-          task: "test-task-id",
-          state: {
-            pending_user_message: "visible follow-up",
-            pending_user_message_ts: "123.456",
-          },
-        }),
-      );
+      const taskRun = createTaskRun({
+        id: "test-run-id",
+        task: "test-task-id",
+        state: {
+          pending_user_message: "visible follow-up",
+          pending_user_message_ts: "123.456",
+        },
+      });
+      vi.spyOn(
+        (
+          s as unknown as {
+            posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
+          }
+        ).posthogAPI,
+        "getTaskRun",
+      ).mockResolvedValue(taskRun);
+
+      await s.sendResumeMessage(payload, taskRun);
 
       const [{ prompt: promptBlocks }] = prompt.mock.calls[0] as unknown as [
         { prompt: ContentBlock[] },
@@ -3390,9 +4137,155 @@ describe("AgentServer HTTP Mode", () => {
         _meta: { ui: { hidden: true } },
       });
     });
+
+    describe("idle same-run resume", () => {
+      const idlePayload: JwtPayload = {
+        task_id: "test-task-id",
+        run_id: "test-run-id",
+        team_id: 1,
+        user_id: 1,
+        distinct_id: "test-distinct-id",
+        mode: "interactive",
+      };
+
+      const setupIdleResume = async (
+        state: Record<string, unknown>,
+      ): Promise<{
+        prompt: ReturnType<typeof vi.fn>;
+        turnCompleteEvents: () => unknown[];
+        sendInitialTaskMessage: () => Promise<void>;
+      }> => {
+        const s = createServer();
+        await s.start();
+
+        const prompt = vi.fn(async () => ({ stopReason: "end_turn" }));
+        const broadcastEvent = vi.fn();
+        const internals = s as unknown as {
+          posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
+          session: { clientConnection: { prompt: typeof prompt } };
+          nativeResume: { sessionId: string; warm: boolean } | null;
+          broadcastEvent: typeof broadcastEvent;
+          sendInitialTaskMessage(
+            payload: JwtPayload,
+            taskRun: TaskRun | null,
+          ): Promise<void>;
+        };
+        internals.session.clientConnection.prompt = prompt;
+        internals.nativeResume = { sessionId: "prior-session", warm: true };
+        internals.broadcastEvent = broadcastEvent;
+        vi.spyOn(internals.posthogAPI, "getTaskRun").mockResolvedValue(
+          createTaskRun({ id: "test-run-id", task: "test-task-id", state }),
+        );
+        process.env.POSTHOG_RESUME_IDLE = "1";
+
+        return {
+          prompt,
+          turnCompleteEvents: () =>
+            broadcastEvent.mock.calls.filter(
+              ([event]) =>
+                (event as { notification?: { method?: string } }).notification
+                  ?.method === POSTHOG_NOTIFICATIONS.TURN_COMPLETE,
+            ),
+          sendInitialTaskMessage: () =>
+            internals.sendInitialTaskMessage(idlePayload, null),
+        };
+      };
+
+      afterEach(() => {
+        delete process.env.POSTHOG_RESUME_IDLE;
+      });
+
+      it("does not prompt the resumed session", async () => {
+        const { prompt, turnCompleteEvents, sendInitialTaskMessage } =
+          await setupIdleResume({});
+
+        await sendInitialTaskMessage();
+
+        expect(prompt).not.toHaveBeenCalled();
+        expect(turnCompleteEvents()).toHaveLength(1);
+      });
+
+      it("still delivers a message that landed during the swap", async () => {
+        const { prompt, sendInitialTaskMessage } = await setupIdleResume({
+          pending_user_message: "landed mid-swap",
+        });
+
+        await sendInitialTaskMessage();
+
+        expect(prompt.mock.calls[0]?.[0]).toMatchObject({
+          prompt: [{ type: "text", text: "landed mid-swap" }],
+        });
+      });
+    });
+
+    it("refetches the run before choosing a native resume prompt", async () => {
+      const s = createServer();
+      await s.start();
+
+      const prompt = vi.fn(async () => ({ stopReason: "cancelled" }));
+      const updateTaskRun = vi.fn(async () => ({}));
+      const internals = s as unknown as {
+        posthogAPI: {
+          getTaskRun: ReturnType<typeof vi.fn>;
+          updateTaskRun: typeof updateTaskRun;
+        };
+        session: {
+          clientConnection: { prompt: typeof prompt };
+        };
+        nativeResume: { sessionId: string; warm: boolean } | null;
+        sendResumeContinuation(
+          payload: JwtPayload,
+          taskRun: TaskRun | null,
+        ): Promise<void>;
+      };
+      internals.session.clientConnection.prompt = prompt;
+      internals.nativeResume = { sessionId: "prior-session", warm: true };
+      internals.posthogAPI.updateTaskRun = updateTaskRun;
+      vi.spyOn(internals.posthogAPI, "getTaskRun").mockResolvedValue(
+        createTaskRun({
+          id: "test-run-id",
+          task: "test-task-id",
+          state: { pending_user_message: "keep my follow-up" },
+        }),
+      );
+
+      await internals.sendResumeContinuation(
+        {
+          task_id: "test-task-id",
+          run_id: "test-run-id",
+          team_id: 1,
+          user_id: 1,
+          distinct_id: "test-distinct-id",
+          mode: "interactive",
+        },
+        createTaskRun({
+          id: "test-run-id",
+          task: "test-task-id",
+          state: { resume_from_run_id: "previous-run" },
+        }),
+      );
+
+      const [{ prompt: promptBlocks }] = prompt.mock.calls[0] as unknown as [
+        { prompt: ContentBlock[] },
+      ];
+      expect(promptBlocks).toEqual([
+        { type: "text", text: "keep my follow-up" },
+      ]);
+      expect(updateTaskRun).toHaveBeenCalledWith(
+        "test-task-id",
+        "test-run-id",
+        {
+          state_remove_keys: ["pending_user_message"],
+        },
+      );
+    });
   });
 
   describe("runtime adapter selection", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
     it("defaults to claude when no runtime adapter is configured", () => {
       const s = createServer();
 
@@ -3431,6 +4324,29 @@ describe("AgentServer HTTP Mode", () => {
       expect(
         (s as unknown as TestableServer).buildCodexInstructions(sessionPrompt),
       ).toContain("Cloud Task Execution");
+    });
+
+    it("injects benjamin into codex instructions when POSTHOG_BENJAMIN is set", () => {
+      vi.stubEnv("POSTHOG_BENJAMIN", "1");
+      const s = createServer({ runtimeAdapter: "codex" });
+      const sessionPrompt = (
+        s as unknown as TestableServer
+      ).buildSessionSystemPrompt();
+
+      expect(
+        (s as unknown as TestableServer).buildCodexInstructions(sessionPrompt),
+      ).toContain("BENJAMIN-PLUS MODE ACTIVE");
+    });
+
+    it("omits benjamin from codex instructions when POSTHOG_BENJAMIN is unset", () => {
+      const s = createServer({ runtimeAdapter: "codex" });
+      const sessionPrompt = (
+        s as unknown as TestableServer
+      ).buildSessionSystemPrompt();
+
+      expect(
+        (s as unknown as TestableServer).buildCodexInstructions(sessionPrompt),
+      ).not.toContain("BENJAMIN-PLUS MODE ACTIVE");
     });
   });
 
@@ -3502,7 +4418,6 @@ describe("AgentServer HTTP Mode", () => {
       const goal = { objective: "Ship the fix", status: "paused" as const };
       s.resumeState = {
         conversation: [],
-        latestGitCheckpoint: null,
         interrupted: false,
         logEntryCount: 1,
         sessionId: "prior-session",
@@ -3552,6 +4467,7 @@ describe("AgentServer HTTP Mode", () => {
         const newSession = vi.fn(async () => ({ sessionId: "fresh-session" }));
 
         const internals = s as unknown as {
+          posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
           session: {
             acpSessionId: string;
             clientConnection: {
@@ -3574,6 +4490,12 @@ describe("AgentServer HTTP Mode", () => {
         internals.session.clientConnection.prompt = prompt;
         internals.session.clientConnection.newSession = newSession;
         internals.nativeResume = { sessionId: "prior-session", warm: true };
+        vi.spyOn(internals.posthogAPI, "getTaskRun").mockResolvedValue(
+          createTaskRun({
+            id: "test-run-id",
+            state: { resume_from_run_id: "previous-run" },
+          }),
+        );
         internals.loadResumeState = vi.fn(async () => {
           internals.resumeState = {
             conversation: [
@@ -3586,7 +4508,6 @@ describe("AgentServer HTTP Mode", () => {
                 content: [{ type: "text", text: "progress so far" }],
               },
             ],
-            latestGitCheckpoint: null,
             interrupted: false,
             logEntryCount: 2,
             sessionId: "prior-session",
@@ -3638,7 +4559,6 @@ describe("AgentServer HTTP Mode", () => {
               content: [{ type: "text", text: "visible answer only" }],
             },
           ],
-          latestGitCheckpoint: null,
           interrupted: false,
           logEntryCount: 3,
           sessionId: "prior-session",
@@ -3733,7 +4653,6 @@ describe("AgentServer HTTP Mode", () => {
           conversation: [
             { role: "user", content: [{ type: "text", text: "continue" }] },
           ],
-          latestGitCheckpoint: null,
           interrupted: false,
           logEntryCount: 1,
           sessionId,
@@ -3810,10 +4729,17 @@ describe("AgentServer HTTP Mode", () => {
         p: JwtPayload,
         u: Record<string, unknown> | undefined,
       ): void;
-      fetchPrAttribution(
-        url: string,
-      ): Promise<{ createdAt: string | null; author: string | null }>;
+      fetchPrAttribution(url: string): Promise<{
+        createdAt: string | null;
+        author: string | null;
+        headRefName: string | null;
+        isCrossRepository: boolean | null;
+      }>;
       fetchGhLogin(): Promise<string | null>;
+      getCurrentCheckout(): Promise<{
+        repository: string | null;
+        branch: string;
+      } | null>;
       detectedPrUrl: string | null;
       posthogAPI: {
         getTaskRun: ReturnType<typeof vi.fn>;
@@ -3824,17 +4750,25 @@ describe("AgentServer HTTP Mode", () => {
     const justNow = () => new Date().toISOString();
     const longAgo = "2020-01-01T00:00:00Z";
     const GH_LOGIN = "run-owner";
+    const RUN_BRANCH = "posthog-self-driving/fix-the-thing-ab12cd";
+    const RUN_REPOSITORY = "posthog/posthog.com";
+    const RUN_CHECKOUT = { repository: RUN_REPOSITORY, branch: RUN_BRANCH };
 
     const setup = (
       prCreatedAt: string | null,
       prAuthor: string | null = GH_LOGIN,
+      prHeadRefName: string | null = RUN_BRANCH,
+      isCrossRepository: boolean | null = false,
     ): PrTestServer => {
       const s = createServer() as unknown as PrTestServer;
       s.fetchPrAttribution = vi.fn(async () => ({
         createdAt: prCreatedAt,
         author: prAuthor,
+        headRefName: prHeadRefName,
+        isCrossRepository,
       }));
       s.fetchGhLogin = vi.fn(async () => GH_LOGIN);
+      s.getCurrentCheckout = vi.fn(async () => RUN_CHECKOUT);
       let storedOutput: Record<string, unknown> | null = null;
       s.posthogAPI = {
         getTaskRun: vi.fn(async () => ({ output: storedOutput })),
@@ -3910,6 +4844,8 @@ describe("AgentServer HTTP Mode", () => {
       s.fetchPrAttribution = vi.fn(async (url: string) => ({
         createdAt: url === PR_URL ? justNow() : longAgo,
         author: GH_LOGIN,
+        headRefName: RUN_BRANCH,
+        isCrossRepository: false,
       }));
       s.maybeAttachCreatedPr(payload, terminalUpdate(PR_URL));
       s.maybeAttachCreatedPr(payload, terminalUpdate(viewed));
@@ -3918,18 +4854,18 @@ describe("AgentServer HTTP Mode", () => {
       expect(s.posthogAPI.updateTaskRun).toHaveBeenCalledTimes(1);
     });
 
-    it("does not attribute a fresh PR authored by someone else (merely viewed)", async () => {
-      const s = setup(justNow(), "someone-else");
+    it("does not attribute a fresh PR authored by someone else from another branch (merely viewed)", async () => {
+      const s = setup(justNow(), "someone-else", "someone-elses-branch");
       s.maybeAttachCreatedPr(payload, terminalUpdate(PR_URL));
       await flush();
       expect(s.posthogAPI.updateTaskRun).not.toHaveBeenCalled();
       expect(s.detectedPrUrl).toBeNull();
     });
 
-    it("attributes a recent PR when the identity is a GitHub App installation (gh api user unavailable)", async () => {
+    it("attributes a recent PR on the run's branch when the identity is a GitHub App installation (gh api user unavailable)", async () => {
       // Cloud runs authenticate with a GitHub App installation token, for which
       // `gh api user` returns 403 → ghLogin is null. The PR is authored by the
-      // app bot (e.g. "app/posthog"); recency alone must carry attribution.
+      // app bot (e.g. "app/posthog"); the head-branch match carries attribution.
       const s = setup(justNow(), "app/posthog");
       s.fetchGhLogin = vi.fn(async () => null);
       s.maybeAttachCreatedPr(payload, terminalUpdate(PR_URL));
@@ -3937,6 +4873,74 @@ describe("AgentServer HTTP Mode", () => {
       expect(s.posthogAPI.updateTaskRun).toHaveBeenCalledWith("t", "r", {
         output: { pr_url: PR_URL, pr_urls: [PR_URL] },
       });
+      expect(s.detectedPrUrl).toBe(PR_URL);
+    });
+
+    it("does not attribute a fresh PR from another branch that a run on the base branch listed", async () => {
+      // A research run sits on master and runs `gh pr list` to look for in-flight
+      // work. Every PR opened in the last few minutes scrolls past it; none is its own.
+      const s = setup(justNow(), "app/posthog", "someone/feature-branch");
+      s.fetchGhLogin = vi.fn(async () => null);
+      s.getCurrentCheckout = vi.fn(async () => ({
+        repository: RUN_REPOSITORY,
+        branch: "master",
+      }));
+      s.maybeAttachCreatedPr(payload, terminalUpdate(PR_URL));
+      await flush();
+      expect(s.posthogAPI.updateTaskRun).not.toHaveBeenCalled();
+      expect(s.detectedPrUrl).toBeNull();
+    });
+
+    it("does not attribute a fresh PR when neither the branch nor the identity can be resolved", async () => {
+      const s = setup(justNow(), "app/posthog", null);
+      s.fetchGhLogin = vi.fn(async () => null);
+      s.getCurrentCheckout = vi.fn(async () => null);
+      s.maybeAttachCreatedPr(payload, terminalUpdate(PR_URL));
+      await flush();
+      expect(s.posthogAPI.updateTaskRun).not.toHaveBeenCalled();
+    });
+
+    it("does not attribute a fork PR whose head branch name matches the run's branch", async () => {
+      // A fork owner picks the branch name, so a matching name proves nothing.
+      const s = setup(justNow(), "someone-else", RUN_BRANCH, true);
+      s.fetchGhLogin = vi.fn(async () => null);
+      s.maybeAttachCreatedPr(payload, terminalUpdate(PR_URL));
+      await flush();
+      expect(s.posthogAPI.updateTaskRun).not.toHaveBeenCalled();
+      expect(s.detectedPrUrl).toBeNull();
+    });
+
+    it("attributes a PR on a branch the run pushed by signed commit when it has no checkout (no-repository mode)", async () => {
+      const s = setup(justNow(), "app/posthog");
+      s.fetchGhLogin = vi.fn(async () => null);
+      s.getCurrentCheckout = vi.fn(async () => null);
+      s.posthogAPI.getTaskRun = vi.fn(async () => ({
+        output: {
+          head_branches: [{ repository: RUN_REPOSITORY, branch: RUN_BRANCH }],
+        },
+      }));
+      s.maybeAttachCreatedPr(payload, terminalUpdate(PR_URL));
+      await flush();
+      expect(s.posthogAPI.updateTaskRun).toHaveBeenCalledTimes(1);
+      expect(s.detectedPrUrl).toBe(PR_URL);
+    });
+
+    it("does not attribute a fresh PR the run's own identity opened from a branch the run never pushed", async () => {
+      // On a desktop run the login is the person's, and they author most PRs in
+      // the repo. A known branch mismatch outranks the author match.
+      const s = setup(justNow(), GH_LOGIN, "another-branch-of-theirs");
+      s.maybeAttachCreatedPr(payload, terminalUpdate(PR_URL));
+      await flush();
+      expect(s.posthogAPI.updateTaskRun).not.toHaveBeenCalled();
+      expect(s.detectedPrUrl).toBeNull();
+    });
+
+    it("falls back to the author match when the run has no branch evidence", async () => {
+      const s = setup(justNow(), GH_LOGIN, "branch-we-cannot-see");
+      s.getCurrentCheckout = vi.fn(async () => null);
+      s.maybeAttachCreatedPr(payload, terminalUpdate(PR_URL));
+      await flush();
+      expect(s.posthogAPI.updateTaskRun).toHaveBeenCalledTimes(1);
       expect(s.detectedPrUrl).toBe(PR_URL);
     });
 
@@ -3950,6 +4954,126 @@ describe("AgentServer HTTP Mode", () => {
   });
 
   describe("buildCloudSystemPrompt", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it.each([
+      {
+        delivery: "canvas_file" as const,
+        expected: "`slack_canvas`, `slack_message`, `slack_file`",
+        notExpected: "You do not have canvas or file delivery",
+      },
+      {
+        delivery: "message" as const,
+        expected: "You do not have canvas or file delivery in this workspace",
+        notExpected: "`slack_canvas`, `slack_message`, `slack_file`",
+      },
+      {
+        delivery: "none" as const,
+        expected: "You do not have artifact delivery in this workspace",
+        notExpected: "create a living artifact before claiming delivery",
+      },
+    ])(
+      "offers only the Slack delivery routes the workspace has: $delivery",
+      ({ delivery, expected, notExpected }) => {
+        const s = createServer() as unknown as TestableServer;
+        s.slackArtifactDelivery = delivery;
+
+        const prompt = s.buildCloudSystemPrompt();
+
+        expect(prompt).toContain("## Delivering to Slack");
+        expect(prompt).toContain(expected);
+        expect(prompt).not.toContain(notExpected);
+      },
+    );
+
+    it("says nothing about Slack delivery when the backend did not resolve it", () => {
+      const s = createServer() as unknown as TestableServer;
+      s.slackArtifactDelivery = null;
+
+      expect(s.buildCloudSystemPrompt()).not.toContain(
+        "## Delivering to Slack",
+      );
+    });
+
+    // Charts need only the rollout flag, while canvas/file also needs Slack scopes still in
+    // review, so the chart offer has to be independent of the delivery mode in both
+    // directions: present on a message-only workspace, absent on a canvas_file one whose
+    // backend never sent the key.
+    it.each([
+      { delivery: "canvas_file" as const, charts: true },
+      { delivery: "message" as const, charts: true },
+    ])(
+      "offers the chart endpoint on a $delivery workspace when charts are on",
+      ({ delivery, charts }) => {
+        const s = createServer() as unknown as TestableServer;
+        s.slackArtifactDelivery = delivery;
+        s.slackChartDelivery = charts;
+
+        const prompt = s.buildCloudSystemPrompt();
+
+        expect(prompt).toContain("living_artifacts/chart/");
+        expect(prompt).toContain("deliver a chart image by default");
+      },
+    );
+
+    it.each([
+      { delivery: "canvas_file" as const },
+      { delivery: "message" as const },
+      { delivery: "none" as const },
+    ])(
+      "never mentions charts on a $delivery workspace when charts are off",
+      ({ delivery }) => {
+        const s = createServer() as unknown as TestableServer;
+        s.slackArtifactDelivery = delivery;
+        s.slackChartDelivery = false;
+
+        expect(s.buildCloudSystemPrompt()).not.toContain(
+          "living_artifacts/chart/",
+        );
+      },
+    );
+
+    it("tells a message-only workspace that charts are the exception to the no-file rule", () => {
+      // Without this the two bullets contradict each other: one forbids file delivery, the
+      // other tells the agent to deliver an image.
+      const s = createServer() as unknown as TestableServer;
+      s.slackArtifactDelivery = "message";
+      s.slackChartDelivery = true;
+
+      const prompt = s.buildCloudSystemPrompt();
+
+      expect(prompt).toContain("Chart images are the one exception");
+      expect(prompt).toContain(
+        "cannot be expressed as a Slack message or a chart image",
+      );
+    });
+
+    it("describes every repository in a shared multi-repository workspace", () => {
+      const s = createServer({
+        repositoryPath: undefined,
+      }) as unknown as TestableServer & { taskRepositories: string[] };
+      s.taskRepositories = ["PostHog/posthog", "PostHog/posthog-js"];
+
+      const prompt = s.buildCloudSystemPrompt();
+
+      expect(prompt).toContain(
+        "PostHog/posthog: /tmp/workspace/repos/posthog/posthog",
+      );
+      expect(prompt).toContain(
+        "PostHog/posthog-js: /tmp/workspace/repos/posthog/posthog-js",
+      );
+      expect(prompt).toContain(
+        "Apply the repository workflow below separately in every repository you change",
+      );
+      expect(prompt).toContain("stop with local changes ready for review");
+      expect(prompt).toContain(
+        "If the user explicitly asks you to open a pull request",
+      );
+      expect(prompt).not.toContain("No Repository Mode");
+    });
+
     it("returns review-first prompt for existing PRs on non-Slack runs", () => {
       const s = createServer();
       const prompt = (s as unknown as TestableServer).buildCloudSystemPrompt(
@@ -3962,7 +5086,7 @@ describe("AgentServer HTTP Mode", () => {
       );
       expect(prompt).not.toContain("gh pr checkout");
       expect(prompt).not.toContain("Create a draft pull request");
-      expect(prompt).toContain("Generated-By: PostHog Code");
+      expect(prompt).toContain("Generated-By: PostHog Desktop");
       expect(prompt).toContain("Task-Id: test-task-id");
     });
 
@@ -3973,16 +5097,16 @@ describe("AgentServer HTTP Mode", () => {
       expect(prompt).toContain(
         "Do NOT create a branch, commit, push, or open a pull request unless the user explicitly asks.",
       );
-      expect(prompt).toContain("Generated-By: PostHog Code");
+      expect(prompt).toContain("Generated-By: PostHog Desktop");
       expect(prompt).toContain("Task-Id: test-task-id");
       expect(prompt).not.toContain("gh pr create --draft");
       // If the user does explicitly ask for a PR in this review-first mode,
-      // the agent must still use the PostHog Code footer, not Claude Code's default.
+      // the agent must still use the PostHog Desktop footer, not Claude Code's default.
       expect(prompt).toContain(
         "If the user explicitly asks you to open a pull request",
       );
       expect(prompt).toContain(
-        "*Created with [PostHog Code](https://posthog.com/code?ref=pr)*",
+        "*Created with [PostHog Desktop](https://posthog.com/desktop?ref=pr)*",
       );
       expect(prompt).toContain(".github/pull_request_template.md");
       expect(prompt).toContain("gh issue list --search");
@@ -4003,28 +5127,45 @@ describe("AgentServer HTTP Mode", () => {
         config: { repositoryPath: undefined },
         shouldContain: [
           "Cloud Task Execution — No Repository Mode",
-          "Clone the repository into /tmp/workspace/repos/<owner>/<repo>",
-          "gh repo clone <owner>/<repo> /tmp/workspace/repos/<owner>/<repo>",
+          "call `list_repos`",
+          "Call `clone_repo`",
+          "It creates a shallow clone",
+          "git fetch --deepen=50 origin <branch>",
+          "git fetch --deepen=200 origin <branch>",
           "If the user explicitly asks you to open or update a pull request",
           "open a draft pull request",
           "unless the user explicitly asks",
           ".github/pull_request_template.md",
           "gh issue list --search",
           "Closes #<n>",
-          "Generated-By: PostHog Code",
+          "Generated-By: PostHog Desktop",
           "Task-Id: test-task-id",
+          "canonical `posthog:exec` tool",
+          "`posthog:read-data-schema`",
         ],
-        shouldNotContain: [],
+        shouldNotContain: [
+          "gh repo clone",
+          "query-run",
+          "event-definitions-list",
+        ],
       },
       {
         label: "createPr false",
         config: { repositoryPath: undefined, createPr: false },
         shouldContain: [
           "Cloud Task Execution — No Repository Mode",
-          "You may clone a repository and make local edits in that clone",
+          "Call `clone_repo`",
+          "You may make local edits in a repository cloned with `clone_repo`",
           "Do NOT create branches, commits, push changes, or open pull requests in this run",
+          "canonical `posthog:exec` tool",
         ],
-        shouldNotContain: ["open a draft pull request", "gh pr create --draft"],
+        shouldNotContain: [
+          "open a draft pull request",
+          "gh pr create --draft",
+          "gh repo clone",
+          "query-run",
+          "event-definitions-list",
+        ],
       },
     ])(
       "returns no-repository prompt for $label",
@@ -4047,12 +5188,12 @@ describe("AgentServer HTTP Mode", () => {
       process.env.POSTHOG_CODE_INTERACTION_ORIGIN = "slack";
       const s = createServer();
       const prompt = (s as unknown as TestableServer).buildCloudSystemPrompt();
-      expect(prompt).toContain("posthog-code/");
+      expect(prompt).toContain("posthog/");
       expect(prompt).toContain("Create a draft pull request");
       expect(prompt).toContain("gh pr create --draft");
-      expect(prompt).toContain("Generated-By: PostHog Code");
+      expect(prompt).toContain("Generated-By: PostHog Desktop");
       expect(prompt).toContain("Task-Id: test-task-id");
-      // Slack-origin PRs are attributed to PostHog, not the PostHog Code app.
+      // Slack-origin PRs are attributed to PostHog, not the PostHog Desktop app.
       expect(prompt).toContain(
         "Created with [PostHog](https://posthog.com?ref=pr)",
       );
@@ -4073,11 +5214,54 @@ describe("AgentServer HTTP Mode", () => {
       delete process.env.POSTHOG_CODE_INTERACTION_ORIGIN;
     });
 
+    it("tells the agent to self-assign through gh rather than match a name", () => {
+      // `gh` already knows who the run acts as, so the agent must read it rather than
+      // ask the user for a handle it is forbidden from guessing.
+      vi.stubEnv("GITHUB_TOKEN", "ghu_actor");
+      const s = createServer();
+      const prompt = (s as unknown as TestableServer).buildCloudSystemPrompt();
+      expect(prompt).toContain('gh issue create --assignee "@me"');
+      expect(prompt).toContain("gh api user --jq .login");
+      // An installation token resolves to the app, so acting on it would assign a bot.
+      expect(prompt).toContain("ending in `[bot]`");
+      // Without this the "never guess a GitHub identity" rule forbids the handle we
+      // just told the agent to read.
+      expect(prompt).toContain(
+        "or one you read from `gh api user --jq .login`",
+      );
+    });
+
+    it.each(["slack", "signal_report"])(
+      "carries the GitHub identity guidance on %s-origin runs",
+      (origin) => {
+        // Non-Slack runs open issues under a person's credentials too, so this must not
+        // sit behind `isSlack`.
+        vi.stubEnv("GITHUB_TOKEN", "ghu_actor");
+        vi.stubEnv("POSTHOG_CODE_INTERACTION_ORIGIN", origin);
+        const s = createServer() as unknown as TestableServer;
+        expect(s.buildCloudSystemPrompt()).toContain(
+          "# Whose GitHub account you are using",
+        );
+      },
+    );
+
+    it("omits the guidance without a token but still permits a gh-read login", () => {
+      // The prompt is built once per session, so a run whose user connects GitHub
+      // partway through never re-renders. Dropping the exception too would keep the
+      // mention rule forbidding the login for the rest of that run.
+      const s = createServer();
+      const prompt = (s as unknown as TestableServer).buildCloudSystemPrompt();
+      expect(prompt).not.toContain("# Whose GitHub account you are using");
+      expect(prompt).toContain(
+        "or one you read from `gh api user --jq .login`",
+      );
+    });
+
     it("returns auto-PR prompt for signal_report-origin runs", () => {
       process.env.POSTHOG_CODE_INTERACTION_ORIGIN = "signal_report";
       const s = createServer();
       const prompt = (s as unknown as TestableServer).buildCloudSystemPrompt();
-      expect(prompt).toContain("posthog-code/");
+      expect(prompt).toContain("posthog/");
       expect(prompt).toContain("Create a draft pull request");
       expect(prompt).toContain("gh pr create --draft");
       delete process.env.POSTHOG_CODE_INTERACTION_ORIGIN;
@@ -4088,9 +5272,9 @@ describe("AgentServer HTTP Mode", () => {
       const prompt = (s as unknown as TestableServer).buildCloudSystemPrompt();
       expect(prompt).toContain("gh pr create --draft");
       expect(prompt).not.toContain("stop with local changes ready for review");
-      // Manual runs keep the PostHog Code attribution.
+      // Manual runs keep the PostHog Desktop attribution.
       expect(prompt).toContain(
-        "Created with [PostHog Code](https://posthog.com/code?ref=pr)",
+        "Created with [PostHog Desktop](https://posthog.com/desktop?ref=pr)",
       );
     });
 
@@ -4113,19 +5297,28 @@ describe("AgentServer HTTP Mode", () => {
     // resolved from run state when the first message arrives.
     type WarmTestable = {
       prewarmedRun: boolean;
-      session: { payload: { task_id: string; run_id: string } } | null;
+      session: {
+        payload: { task_id: string; run_id: string };
+        acpSessionId: string;
+        clientConnection: {
+          setSessionConfigOption: ReturnType<typeof vi.fn>;
+        };
+      } | null;
       posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
-      resolveWarmAutoPublishUpgrade(): Promise<string | null>;
+      resolveActivationSettings(): Promise<string | null>;
       buildCloudSystemPrompt(): string;
     };
     const makeWarmServer = (
       state: Record<string, unknown> | Error,
       overrides: Partial<ConstructorParameters<typeof AgentServer>[0]> = {},
+      setSessionConfigOption = vi.fn(async () => ({ configOptions: [] })),
     ): WarmTestable => {
       const t = createServer(overrides) as unknown as WarmTestable;
       t.prewarmedRun = true;
       t.session = {
         payload: { task_id: "test-task-id", run_id: "test-run-id" },
+        acpSessionId: "test-session-id",
+        clientConnection: { setSessionConfigOption },
       };
       t.posthogAPI = {
         getTaskRun:
@@ -4138,27 +5331,76 @@ describe("AgentServer HTTP Mode", () => {
       return t;
     };
 
+    it("applies activation-time reasoning before a prewarmed run's first turn", async () => {
+      const setSessionConfigOption = vi.fn(async () => ({ configOptions: [] }));
+      const t = createServer({ reasoningEffort: "high" }) as unknown as {
+        prewarmedRun: boolean;
+        session: {
+          payload: { task_id: string; run_id: string };
+          acpSessionId: string;
+          clientConnection: {
+            setSessionConfigOption: typeof setSessionConfigOption;
+          };
+        };
+        posthogAPI: { getTaskRun: ReturnType<typeof vi.fn> };
+        resolveActivationSettings(): Promise<string | null>;
+      };
+      t.prewarmedRun = true;
+      t.session = {
+        payload: { task_id: "test-task-id", run_id: "test-run-id" },
+        acpSessionId: "test-session-id",
+        clientConnection: { setSessionConfigOption },
+      };
+      t.posthogAPI = {
+        getTaskRun: vi.fn(async () => ({
+          state: { prewarmed: true, reasoning_effort: "xhigh" },
+        })),
+      };
+
+      await t.resolveActivationSettings();
+      await t.resolveActivationSettings();
+
+      expect(setSessionConfigOption).toHaveBeenCalledOnce();
+      expect(setSessionConfigOption).toHaveBeenCalledWith({
+        sessionId: "test-session-id",
+        configId: "effort",
+        value: "xhigh",
+      });
+      expect(t.posthogAPI.getTaskRun).toHaveBeenCalledOnce();
+    });
+
     it("upgrades a prewarmed run to auto-publish from run state on the first message", async () => {
       const t = makeWarmServer({ prewarmed: true, auto_publish: true });
 
-      const override = await t.resolveWarmAutoPublishUpgrade();
+      const override = await t.resolveActivationSettings();
       expect(override).toContain("OVERRIDE PREVIOUS INSTRUCTIONS");
       expect(override).toContain("gh pr create --draft");
       // The flip persists for the rest of the session...
       expect(t.buildCloudSystemPrompt()).toContain("gh pr create --draft");
       // ...and the override is injected only once.
-      expect(await t.resolveWarmAutoPublishUpgrade()).toBeNull();
+      expect(await t.resolveActivationSettings()).toBeNull();
       expect(t.posthogAPI.getTaskRun).toHaveBeenCalledTimes(1);
+    });
+
+    it("recovers auto-publish from run state when the launch flag is missing", async () => {
+      const t = makeWarmServer({ auto_publish: true });
+      t.prewarmedRun = false;
+
+      const override = await t.resolveActivationSettings();
+
+      expect(override).toContain("OVERRIDE PREVIOUS INSTRUCTIONS");
+      expect(t.buildCloudSystemPrompt()).toContain("gh pr create --draft");
+      expect(t.posthogAPI.getTaskRun).toHaveBeenCalledOnce();
     });
 
     it("keeps a prewarmed run review-first when run state has no auto_publish", async () => {
       const t = makeWarmServer({ prewarmed: true });
 
-      expect(await t.resolveWarmAutoPublishUpgrade()).toBeNull();
+      expect(await t.resolveActivationSettings()).toBeNull();
       expect(t.buildCloudSystemPrompt()).toContain(
         "stop with local changes ready for review",
       );
-      expect(await t.resolveWarmAutoPublishUpgrade()).toBeNull();
+      expect(await t.resolveActivationSettings()).toBeNull();
       expect(t.posthogAPI.getTaskRun).toHaveBeenCalledTimes(1);
     });
 
@@ -4170,8 +5412,8 @@ describe("AgentServer HTTP Mode", () => {
         { createPr: false },
       );
 
-      expect(await t.resolveWarmAutoPublishUpgrade()).toBeNull();
-      expect(t.posthogAPI.getTaskRun).not.toHaveBeenCalled();
+      expect(await t.resolveActivationSettings()).toBeNull();
+      expect(t.posthogAPI.getTaskRun).toHaveBeenCalledOnce();
       expect(t.buildCloudSystemPrompt()).toContain(
         "stop with local changes ready for review",
       );
@@ -4179,14 +5421,32 @@ describe("AgentServer HTTP Mode", () => {
 
     it("retries the state fetch on a later message when it fails", async () => {
       const t = makeWarmServer(new Error("fetch failed"));
-      expect(await t.resolveWarmAutoPublishUpgrade()).toBeNull();
+      expect(await t.resolveActivationSettings()).toBeNull();
 
       t.posthogAPI.getTaskRun = vi.fn(async () => ({
         state: { prewarmed: true, auto_publish: true },
       }));
-      expect(await t.resolveWarmAutoPublishUpgrade()).toContain(
+      expect(await t.resolveActivationSettings()).toContain(
         "gh pr create --draft",
       );
+    });
+
+    it("retries reasoning configuration without blocking the first prompt", async () => {
+      const setSessionConfigOption = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("adapter unavailable"))
+        .mockResolvedValueOnce({ configOptions: [] });
+      const t = makeWarmServer(
+        { prewarmed: true, reasoning_effort: "xhigh" },
+        { reasoningEffort: "high" },
+        setSessionConfigOption,
+      );
+
+      await expect(t.resolveActivationSettings()).resolves.toBeNull();
+      await expect(t.resolveActivationSettings()).resolves.toBeNull();
+
+      expect(setSessionConfigOption).toHaveBeenCalledTimes(2);
+      expect(t.posthogAPI.getTaskRun).toHaveBeenCalledTimes(2);
     });
 
     it.each([
@@ -4264,7 +5524,8 @@ describe("AgentServer HTTP Mode", () => {
       const s = createServer();
       const prompt = (s as unknown as TestableServer).buildCloudSystemPrompt();
       expect(prompt).toContain("gh pr create --draft`");
-      expect(prompt).not.toContain("--base");
+      // Scoped to the create command; other sections mention the flag legitimately.
+      expect(prompt).not.toContain("gh pr create --draft --base");
       delete process.env.POSTHOG_CODE_INTERACTION_ORIGIN;
     });
 
@@ -4331,6 +5592,10 @@ describe("AgentServer HTTP Mode", () => {
           expect(prompt).toContain("# Identity");
           expect(prompt).toContain("PostHog Slack app");
           expect(prompt).toContain("Do NOT refer to yourself as Claude");
+          expect(prompt).toContain("# PostHog products first");
+          expect(prompt).toContain(
+            "Never send the user to a third-party product for something PostHog does",
+          );
           delete process.env.POSTHOG_CODE_INTERACTION_ORIGIN;
         },
       );
@@ -4406,6 +5671,7 @@ describe("AgentServer HTTP Mode", () => {
         ).buildCloudSystemPrompt();
         expect(prompt).not.toContain("# Identity");
         expect(prompt).not.toContain("PostHog Slack app");
+        expect(prompt).not.toContain("# PostHog products first");
         delete process.env.POSTHOG_CODE_INTERACTION_ORIGIN;
       });
     });
@@ -4429,7 +5695,7 @@ describe("AgentServer HTTP Mode", () => {
             "*Created with [PostHog](https://posthog.com?ref=pr)*",
           );
           expect(prompt).not.toContain("from a [Slack thread]");
-          expect(prompt).not.toContain("PostHog Code](https://posthog.com");
+          expect(prompt).not.toContain("PostHog Desktop](https://posthog.com");
         } finally {
           delete process.env.POSTHOG_CODE_INTERACTION_ORIGIN;
         }
@@ -4503,7 +5769,7 @@ describe("AgentServer HTTP Mode", () => {
         expect(prompt).toContain("**Why**");
         expect(prompt).toContain("Keep the PR description brief");
         expect(prompt).toContain(
-          "*Created with [PostHog Code](https://posthog.com/code?ref=pr)*",
+          "*Created with [PostHog Desktop](https://posthog.com/desktop?ref=pr)*",
         );
         expect(prompt).not.toContain("from a [Slack thread]");
       });

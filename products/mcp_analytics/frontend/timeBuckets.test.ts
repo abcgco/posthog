@@ -1,8 +1,25 @@
 import { dayjs } from 'lib/dayjs'
 
-import { buildBucketKeys, formatBucketLabel, lastBucketIsInProgress, normalizeBucket } from './timeBuckets'
+import { IntervalType } from '~/types'
+
+import {
+    buildBucketKeys,
+    formatBucketLabel,
+    intervalOptionsForWindow,
+    lastBucketIsInProgress,
+    normalizeBucket,
+    resolveInterval,
+} from './timeBuckets'
 
 describe('timeBuckets', () => {
+    beforeEach(() => {
+        jest.useFakeTimers().setSystemTime(new Date('2026-06-18T12:00:00Z'))
+    })
+
+    afterEach(() => {
+        jest.useRealTimers()
+    })
+
     describe('normalizeBucket', () => {
         // Guards the flat-zero-sparkline bug: however the query serializes the bucket, its
         // wall-clock digits must survive verbatim, even when the browser sits in a different
@@ -131,6 +148,59 @@ describe('timeBuckets', () => {
             const now = dayjs.tz('2026-06-29 23:15:00', tz)
             expect(lastBucketIsInProgress(keys, tz, 'day', now)).toBe(true)
             expect(lastBucketIsInProgress(keys, 'Europe/Athens', 'day', now)).toBe(false)
+        })
+    })
+
+    describe('resolveInterval', () => {
+        // Relative windows resolve against the clock, so a -7d window that sits inside one calendar
+        // month on most days straddles two at a month boundary. Pin the clock mid-month, or those
+        // cases invert on the 1st of every month.
+        beforeEach(() => {
+            jest.useFakeTimers()
+            jest.setSystemTime(new Date('2026-06-15T12:00:00.000Z'))
+        })
+
+        afterEach(() => {
+            jest.useRealTimers()
+        })
+
+        // A pin outlives the window it was set on, so it has to give way once the window outgrows it:
+        // charting a year hour by hour also runs past the query's row limit, which drops the newest
+        // buckets. A pin that still fits has to beat the auto-choice — that's the point of pinning.
+        it.each([
+            ['-14d', 'hour', 'hour'], // 337 hourly buckets: fits
+            ['-1y', 'hour', 'month'], // 8761 hourly buckets: back to the auto-choice
+            ['-7d', 'month', 'day'], // shorter than one month: back to the auto-choice
+            ['-1y', 'day', 'day'], // 367 daily buckets: fits, and beats the auto-choice
+            ['-1y', null, 'month'], // nothing pinned: the auto-choice
+        ])('groups a %s window pinned to %s by %s', (dateFrom, pinned, expected) => {
+            expect(resolveInterval(dateFrom, null, 'UTC', pinned as IntervalType | null)).toBe(expected)
+        })
+    })
+
+    describe('intervalOptionsForWindow', () => {
+        beforeEach(() => {
+            jest.useFakeTimers()
+            jest.setSystemTime(new Date('2026-06-15T12:00:00.000Z'))
+        })
+
+        afterEach(() => {
+            jest.useRealTimers()
+        })
+
+        it('disables the intervals that would smear or collapse the window', () => {
+            expect(intervalOptionsForWindow('-1y', null, 'UTC')).toEqual([
+                { value: 'hour', label: 'Hour', disabledReason: 'Range too long' },
+                { value: 'day', label: 'Day', disabledReason: null },
+                { value: 'week', label: 'Week', disabledReason: null },
+                { value: 'month', label: 'Month', disabledReason: null },
+            ])
+            expect(intervalOptionsForWindow('-7d', null, 'UTC')).toEqual([
+                { value: 'hour', label: 'Hour', disabledReason: null },
+                { value: 'day', label: 'Day', disabledReason: null },
+                { value: 'week', label: 'Week', disabledReason: null },
+                { value: 'month', label: 'Month', disabledReason: 'Range too short' },
+            ])
         })
     })
 })

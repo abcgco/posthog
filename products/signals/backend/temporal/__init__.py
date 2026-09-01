@@ -63,13 +63,19 @@ from products.signals.backend.temporal.signal_queries import (
 )
 from products.signals.backend.temporal.summary import (
     SignalReportSummaryWorkflow,
+    check_report_quota_gate_activity,
     dispatch_inbox_slack_notifications_activity,
+    implementation_buffer_seconds_activity,
     mark_report_failed_activity,
     mark_report_in_progress_activity,
     mark_report_pending_input_activity,
     mark_report_ready_activity,
+    maybe_autostart_implementation_activity,
     publish_report_completed_activity,
+    report_has_assigned_signals_activity,
+    report_is_candidate_activity,
     reset_report_to_potential_activity,
+    revert_report_to_candidate_activity,
 )
 
 WORKFLOWS = [
@@ -113,10 +119,16 @@ ACTIVITIES = [
     match_signal_to_report_activity,
     mark_report_failed_activity,
     read_signals_from_s3_activity,
+    check_report_quota_gate_activity,
     mark_report_in_progress_activity,
     mark_report_pending_input_activity,
     mark_report_ready_activity,
+    maybe_autostart_implementation_activity,
+    implementation_buffer_seconds_activity,
+    report_is_candidate_activity,
     publish_report_completed_activity,
+    report_has_assigned_signals_activity,
+    revert_report_to_candidate_activity,
     delete_team_reports_activity,
     get_grouping_paused_state_activity,
     pause_grouping_until_activity,

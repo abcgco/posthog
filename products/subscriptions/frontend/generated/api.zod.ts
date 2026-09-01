@@ -27,6 +27,8 @@ export const subscriptionsCreateBodyTitleMax = 100
 
 export const subscriptionsCreateBodySummaryPromptGuideMax = 500
 
+export const subscriptionsCreateBodyDeliveryConfigOnePostAllInsightsInMainMessageDefault = false
+
 export const SubscriptionsCreateBody = /* @__PURE__ */ zod
     .object({
         dashboard: zod
@@ -41,7 +43,7 @@ export const SubscriptionsCreateBody = /* @__PURE__ */ zod
             .array(zod.number())
             .optional()
             .describe(
-                'List of insight IDs from the dashboard to include. Required for dashboard subscriptions, max 6.'
+                'List of insight IDs from the dashboard to include. Required for dashboard subscriptions, max 10.'
             ),
         prompt: zod
             .string()
@@ -118,7 +120,7 @@ export const SubscriptionsCreateBody = /* @__PURE__ */ zod
             )
             .nullish()
             .describe(
-                'Days of week for weekly subscriptions: monday, tuesday, wednesday, thursday, friday, saturday, sunday.'
+                'Days of week for daily or weekly subscriptions: monday, tuesday, wednesday, thursday, friday, saturday, sunday.'
             ),
         bysetpos: zod
             .number()
@@ -176,6 +178,18 @@ export const SubscriptionsCreateBody = /* @__PURE__ */ zod
             .describe(
                 'Optional free-text guidance (max 500 chars) steering the AI summary, e.g. which metrics to emphasize. Only settable when AI summary context is enabled for the organization; clearing it (empty string) is always allowed.'
             ),
+        delivery_config: zod
+            .object({
+                post_all_insights_in_main_message: zod
+                    .boolean()
+                    .default(subscriptionsCreateBodyDeliveryConfigOnePostAllInsightsInMainMessageDefault)
+                    .describe(
+                        'Slack only: when true, upload all insight images together in the main Slack message instead of posting the first image in the main message and the rest as threaded replies. Defaults to false.'
+                    ),
+            })
+            .describe('Typed view over the Subscription.delivery_config JSON blob.')
+            .optional()
+            .describe('Per-delivery rendering options. Each option documents which delivery targets it applies to.'),
     })
     .describe('Standard Subscription serializer.')
 
@@ -197,6 +211,8 @@ export const subscriptionsUpdateBodyTitleMax = 100
 
 export const subscriptionsUpdateBodySummaryPromptGuideMax = 500
 
+export const subscriptionsUpdateBodyDeliveryConfigOnePostAllInsightsInMainMessageDefault = false
+
 export const SubscriptionsUpdateBody = /* @__PURE__ */ zod
     .object({
         dashboard: zod
@@ -211,7 +227,7 @@ export const SubscriptionsUpdateBody = /* @__PURE__ */ zod
             .array(zod.number())
             .optional()
             .describe(
-                'List of insight IDs from the dashboard to include. Required for dashboard subscriptions, max 6.'
+                'List of insight IDs from the dashboard to include. Required for dashboard subscriptions, max 10.'
             ),
         prompt: zod
             .string()
@@ -288,7 +304,7 @@ export const SubscriptionsUpdateBody = /* @__PURE__ */ zod
             )
             .nullish()
             .describe(
-                'Days of week for weekly subscriptions: monday, tuesday, wednesday, thursday, friday, saturday, sunday.'
+                'Days of week for daily or weekly subscriptions: monday, tuesday, wednesday, thursday, friday, saturday, sunday.'
             ),
         bysetpos: zod
             .number()
@@ -346,6 +362,18 @@ export const SubscriptionsUpdateBody = /* @__PURE__ */ zod
             .describe(
                 'Optional free-text guidance (max 500 chars) steering the AI summary, e.g. which metrics to emphasize. Only settable when AI summary context is enabled for the organization; clearing it (empty string) is always allowed.'
             ),
+        delivery_config: zod
+            .object({
+                post_all_insights_in_main_message: zod
+                    .boolean()
+                    .default(subscriptionsUpdateBodyDeliveryConfigOnePostAllInsightsInMainMessageDefault)
+                    .describe(
+                        'Slack only: when true, upload all insight images together in the main Slack message instead of posting the first image in the main message and the rest as threaded replies. Defaults to false.'
+                    ),
+            })
+            .describe('Typed view over the Subscription.delivery_config JSON blob.')
+            .optional()
+            .describe('Per-delivery rendering options. Each option documents which delivery targets it applies to.'),
     })
     .describe('Standard Subscription serializer.')
 
@@ -367,6 +395,8 @@ export const subscriptionsPartialUpdateBodyTitleMax = 100
 
 export const subscriptionsPartialUpdateBodySummaryPromptGuideMax = 500
 
+export const subscriptionsPartialUpdateBodyDeliveryConfigOnePostAllInsightsInMainMessageDefault = false
+
 export const SubscriptionsPartialUpdateBody = /* @__PURE__ */ zod
     .object({
         dashboard: zod
@@ -381,7 +411,7 @@ export const SubscriptionsPartialUpdateBody = /* @__PURE__ */ zod
             .array(zod.number())
             .optional()
             .describe(
-                'List of insight IDs from the dashboard to include. Required for dashboard subscriptions, max 6.'
+                'List of insight IDs from the dashboard to include. Required for dashboard subscriptions, max 10.'
             ),
         prompt: zod
             .string()
@@ -462,7 +492,7 @@ export const SubscriptionsPartialUpdateBody = /* @__PURE__ */ zod
             )
             .nullish()
             .describe(
-                'Days of week for weekly subscriptions: monday, tuesday, wednesday, thursday, friday, saturday, sunday.'
+                'Days of week for daily or weekly subscriptions: monday, tuesday, wednesday, thursday, friday, saturday, sunday.'
             ),
         bysetpos: zod
             .number()
@@ -523,5 +553,17 @@ export const SubscriptionsPartialUpdateBody = /* @__PURE__ */ zod
             .describe(
                 'Optional free-text guidance (max 500 chars) steering the AI summary, e.g. which metrics to emphasize. Only settable when AI summary context is enabled for the organization; clearing it (empty string) is always allowed.'
             ),
+        delivery_config: zod
+            .object({
+                post_all_insights_in_main_message: zod
+                    .boolean()
+                    .default(subscriptionsPartialUpdateBodyDeliveryConfigOnePostAllInsightsInMainMessageDefault)
+                    .describe(
+                        'Slack only: when true, upload all insight images together in the main Slack message instead of posting the first image in the main message and the rest as threaded replies. Defaults to false.'
+                    ),
+            })
+            .describe('Typed view over the Subscription.delivery_config JSON blob.')
+            .optional()
+            .describe('Per-delivery rendering options. Each option documents which delivery targets it applies to.'),
     })
     .describe('Standard Subscription serializer.')

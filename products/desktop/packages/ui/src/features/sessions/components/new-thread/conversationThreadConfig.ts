@@ -1,20 +1,5 @@
-import {
-  ArrowsLeftRight,
-  Brain,
-  ChatCircle,
-  FileText,
-  Globe,
-  type Icon,
-  MagnifyingGlass,
-  PencilSimple,
-  PuzzlePiece,
-  Robot,
-  Terminal,
-  Trash,
-  Wrench,
-} from "@phosphor-icons/react";
+import { type Icon, PuzzlePiece, Robot } from "@phosphor-icons/react";
 import type { CodeToolKind } from "@posthog/ui/features/sessions/types";
-import { SUBAGENT_SPAWN_TOOL_NAMES } from "../session-update/collaborationTools";
 
 /**
  * Single source of truth for the modernized conversation thread's tuneable
@@ -22,43 +7,9 @@ import { SUBAGENT_SPAWN_TOOL_NAMES } from "../session-update/collaborationTools"
  * live in the components or the grouping selector.
  */
 
-// ---------- Collapse modes ----------
-
-/** How aggressively completed turns collapse into a tool-call group chip. */
-export type CollapseMode = "all" | "partial" | "none";
-
-export const COLLAPSE_MODE_DEFAULT: CollapseMode = "all";
-
-export const COLLAPSE_MODE_OPTIONS: {
-  value: CollapseMode;
-  label: string;
-  description: string;
-}[] = [
-  {
-    value: "all",
-    label: "All collapsed",
-    description: "Every turn's tool activity is collapsed into a summary chip.",
-  },
-  {
-    value: "partial",
-    label: "Collapse when finished turn",
-    description:
-      "The active turn streams expanded; completed turns collapse to a chip.",
-  },
-  {
-    value: "none",
-    label: "No collapsing",
-    description: "Everything stays expanded.",
-  },
-];
-
 // ---------- Grouping ----------
 
 export const grouping = {
-  /**
-   * Tool names that create a subagent. Counted separately in the chip summary.
-   */
-  subagentToolNames: SUBAGENT_SPAWN_TOOL_NAMES,
   /**
    * MCP-app tool calls are excluded from collapsing so their iframes stay
    * mounted (the `keepMounted` contract). Flip to false to fold them in.
@@ -78,14 +29,15 @@ export const grouping = {
 export interface GroupCounts {
   execute: number;
   read: number;
+  list: number;
   edit: number;
   delete: number;
   move: number;
   search: number;
   fetch: number;
   subagents: number;
+  workflows: number;
   other: number;
-  messages: number;
 }
 
 function plural(n: number, singular: string, pluralForm: string): string {
@@ -106,6 +58,8 @@ export function buildDoneLabel(counts: GroupCounts): string {
   if (counts.execute > 0)
     seg.push(`ran ${plural(counts.execute, "command", "commands")}`);
   if (counts.read > 0) seg.push(`read ${files(counts.read)}`);
+  if (counts.list > 0)
+    seg.push(`listed ${plural(counts.list, "directory", "directories")}`);
   if (counts.edit > 0) seg.push(`edited ${files(counts.edit)}`);
   if (counts.delete > 0) seg.push(`deleted ${files(counts.delete)}`);
   if (counts.move > 0) seg.push(`moved ${files(counts.move)}`);
@@ -114,28 +68,14 @@ export function buildDoneLabel(counts: GroupCounts): string {
   if (counts.fetch > 0)
     seg.push(`fetched ${plural(counts.fetch, "page", "pages")}`);
   if (counts.subagents > 0)
-    seg.push(plural(counts.subagents, "subagent", "subagents"));
+    seg.push(`ran ${plural(counts.subagents, "subagent", "subagents")}`);
+  if (counts.workflows === 1) seg.push("ran a workflow");
+  if (counts.workflows > 1) seg.push(`ran ${counts.workflows} workflows`);
   if (counts.other > 0)
     seg.push(plural(counts.other, "tool call", "tool calls"));
   if (seg.length === 0) return "Worked";
   const joined = seg.join(", ");
   return joined.charAt(0).toUpperCase() + joined.slice(1);
-}
-
-const KIND_ICONS: Partial<Record<CodeToolKind, Icon>> = {
-  read: FileText,
-  edit: PencilSimple,
-  delete: Trash,
-  move: ArrowsLeftRight,
-  search: MagnifyingGlass,
-  execute: Terminal,
-  think: Brain,
-  fetch: Globe,
-  question: ChatCircle,
-};
-
-export function iconForToolKind(kind: CodeToolKind | null | undefined): Icon {
-  return (kind && KIND_ICONS[kind]) || Wrench;
 }
 
 export const SUBAGENT_ICON: Icon = Robot;

@@ -1,17 +1,27 @@
 import type { Icon } from "@phosphor-icons/react";
-import { readAgentToolName, readMcpToolDescriptor } from "@posthog/shared";
+import {
+  piSubagentToolDetailsSchema,
+  readAgentToolName,
+  readMcpToolDescriptor,
+} from "@posthog/shared";
 import type { ConversationItem } from "@posthog/ui/features/sessions/components/buildConversationItems";
 import { isUserInitiatedConversationItem } from "@posthog/ui/features/sessions/components/isUserInitiatedConversationItem";
 import {
   buildDoneLabel,
-  type CollapseMode,
   type GroupCounts,
   type GroupIconKey,
   grouping,
-  iconForToolKind,
   MCP_ICON,
   SUBAGENT_ICON,
 } from "@posthog/ui/features/sessions/components/new-thread/conversationThreadConfig";
+import {
+  isPlanApprovalTool,
+  isSubagentSpawnTool,
+  isWorkflowTool,
+} from "@posthog/ui/features/sessions/components/session-update/collaborationTools";
+import { hasInlineArtifact } from "@posthog/ui/features/sessions/components/session-update/inlineArtifacts";
+import { iconForToolKind } from "@posthog/ui/features/sessions/components/session-update/toolIcons";
+import type { ToolCall } from "@posthog/ui/features/sessions/types";
 
 export interface GroupIconEntry {
   Icon: Icon;
@@ -67,8 +77,35 @@ export interface ThreadGrouping {
   idToRowIndex: Map<string, number>;
 }
 
-function getToolName(update: { _meta?: unknown }): string | undefined {
-  return readAgentToolName(update._meta);
+function getToolName(update: {
+  _meta?: unknown;
+  title?: string | null;
+}): string | undefined {
+  const toolName = readAgentToolName(update._meta);
+  if (toolName) {
+    return toolName;
+  }
+  return isSubagentSpawnTool(update.title) ? "subagent" : undefined;
+}
+
+function subagentCount(item: ConversationItem): number {
+  if (item.type !== "session_update") {
+    return 0;
+  }
+
+  const update = item.update;
+  if (update.sessionUpdate !== "tool_call") {
+    return 0;
+  }
+
+  const resolved = update.toolCallId
+    ? item.turnContext.toolCalls.get(update.toolCallId)
+    : undefined;
+  const details = resolved?.details ?? update.details;
+  const parsed = piSubagentToolDetailsSchema.safeParse(details);
+  return parsed.success && parsed.data.results.length > 0
+    ? parsed.data.results.length
+    : 1;
 }
 
 function isMcpToolItem(item: ConversationItem): boolean {
@@ -97,14 +134,32 @@ function isDirectMessageItem(item: ConversationItem): boolean {
 
 /**
  * A plan presented for approval (the ExitPlanMode / switch_mode tool call,
- * rendered by PlanApprovalView). Never folded — a plan is meant to be read.
+ * rendered by PlanApprovalView). Keep it visible so the user can read it.
  */
-function isPlanItem(item: ConversationItem): boolean {
+export function isPlanItem(item: ConversationItem): boolean {
   return (
     item.type === "session_update" &&
     item.update.sessionUpdate === "tool_call" &&
-    item.update.kind === "switch_mode"
+    (item.update.kind === "switch_mode" ||
+      isPlanApprovalTool(readAgentToolName(item.update._meta)))
   );
+}
+
+/**
+ * A tool call that hands the user a deliverable (an uploaded file, a pull
+ * request it just opened). The card belongs in the thread, so the run that
+ * produced it must not fold away behind a "ran 12 commands" summary.
+ */
+function isArtifactItem(item: ConversationItem): boolean {
+  if (item.type !== "session_update") return false;
+  if (item.update.sessionUpdate !== "tool_call") return false;
+  const { toolCallId } = item.update;
+  // The output a PR is read from arrives on the tool_call_update, which lands
+  // in the turn's map rather than on the item this grouping walks.
+  const resolved = toolCallId
+    ? item.turnContext.toolCalls.get(toolCallId)
+    : undefined;
+  return hasInlineArtifact(resolved ?? (item.update as unknown as ToolCall));
 }
 
 /**
@@ -119,24 +174,30 @@ export function isGroupableItem(item: ConversationItem): boolean {
   if (
     isAlwaysVisibleItem(item) ||
     isDirectMessageItem(item) ||
-    isPlanItem(item)
+    isPlanItem(item) ||
+    isArtifactItem(item)
   )
     return false;
   return true;
 }
 
+/**
+ * Tallies, icons, and live/done labels for a run of grouped items. Exported so the thread's
+ * `ToolGroup` reads the same counts, keeping one definition of what "ran 3 commands" means.
+ */
 function summarize(items: ConversationItem[]): GroupSummary {
   const counts: GroupCounts = {
     execute: 0,
     read: 0,
+    list: 0,
     edit: 0,
     delete: 0,
     move: 0,
     search: 0,
     fetch: 0,
     subagents: 0,
+    workflows: 0,
     other: 0,
-    messages: 0,
   };
   let liveLabel: string | null = null;
   let lastToolStatus: string | undefined;
@@ -158,8 +219,10 @@ function summarize(items: ConversationItem[]): GroupSummary {
       if (update.title) liveLabel = update.title;
       lastToolStatus = update.status ?? undefined;
       const name = getToolName(update);
-      if (name && grouping.subagentToolNames.has(name)) {
-        counts.subagents++;
+      if (isWorkflowTool(name ?? update.title)) {
+        counts.workflows++;
+      } else if (isSubagentSpawnTool(name)) {
+        counts.subagents += subagentCount(item);
         addIcon(SUBAGENT_ICON, "subagent");
       } else if (readMcpToolDescriptor(update._meta)) {
         counts.other++;
@@ -172,6 +235,9 @@ function summarize(items: ConversationItem[]): GroupSummary {
             break;
           case "read":
             counts.read++;
+            break;
+          case "list":
+            counts.list++;
             break;
           case "edit":
             counts.edit++;
@@ -194,11 +260,6 @@ function summarize(items: ConversationItem[]): GroupSummary {
         }
         addIcon(iconForToolKind(kind), `kind:${kind ?? "other"}`);
       }
-    } else if (
-      update.sessionUpdate === "agent_message_chunk" ||
-      update.sessionUpdate === "console"
-    ) {
-      counts.messages++;
     }
     // A thought still streaming at the end of the group means the agent is
     // actively thinking — the chip must not read as finished ("Worked").
@@ -217,12 +278,14 @@ function summarize(items: ConversationItem[]): GroupSummary {
   const hasCountableWork =
     counts.execute +
       counts.read +
+      counts.list +
       counts.edit +
       counts.delete +
       counts.move +
       counts.search +
       counts.fetch +
       counts.subagents +
+      counts.workflows +
       counts.other >
     0;
   return {
@@ -244,7 +307,11 @@ const summaryCache = new WeakMap<
   { len: number; summary: GroupSummary }
 >();
 
-function summarizeMemo(
+/**
+ * `summarize`, skipping the walk for a run whose turn has completed. Exported so callers rendering
+ * many groups per streamed chunk don't re-walk the settled ones.
+ */
+export function summarizeMemo(
   leading: ConversationItem[],
   turnComplete: boolean,
 ): GroupSummary {
@@ -261,14 +328,13 @@ function summarizeMemo(
 /**
  * Transform the flat conversation items into rows for the new thread, folding
  * each turn's tool-call work into a collapsible group according to the global
- * collapse mode and any per-group overrides. Emits the keepMounted indices and
+ * per-group overrides. Emits the keepMounted indices and
  * item→row map in the same pass so callers don't re-walk the list.
  *
  * Safe to run on every render under useMemo; frozen-turn summaries are cached.
  */
 export function buildThreadGroups(
   items: ConversationItem[],
-  mode: CollapseMode,
   overrides: Record<string, boolean>,
 ): ThreadGrouping {
   const rows: ThreadRow[] = [];
@@ -291,17 +357,12 @@ export function buildThreadGroups(
       first.type === "session_update" && first.turnContext.turnComplete;
     const groupId = `group:${first.id}`;
 
-    // Base behavior from the global mode; a per-group override (true=expanded,
-    // false=collapsed) wins. A chip is shown whenever the group is collapsible
-    // by the mode or the user explicitly collapsed it — but never for a group
-    // with no countable tool work (e.g. a lone streaming thought): folding it
-    // would hide the only thing happening behind a meaningless "Worked" chip.
+    // Groups collapse by default; a per-group override (true=expanded) wins. No chip for a group
+    // with no countable tool work (e.g. a lone streaming thought): folding it would hide the only
+    // thing happening behind a meaningless "Worked" chip.
     const summary = summarizeMemo(leading, turnComplete);
-    const baseCollapse = mode === "all" || (mode === "partial" && turnComplete);
-    const override = overrides[groupId];
-    const expanded = override ?? !baseCollapse;
-    const chipPresent =
-      summary.hasCountableWork && (baseCollapse || override === false);
+    const expanded = overrides[groupId] ?? false;
+    const chipPresent = summary.hasCountableWork;
 
     if (chipPresent) {
       // The chip owns its children (rendered inside one bordered box when

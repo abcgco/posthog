@@ -14,3 +14,9 @@ export const CANVAS_DATA_SERVICE = Symbol.for(
 export const CHANNEL_TASKS_SERVICE = Symbol.for(
   "posthog.core.canvas.channelTasksService",
 );
+export const CANVAS_APPLICATION_SERVICE = Symbol.for(
+  "posthog.core.canvas.applicationService",
+);
+export const CANVAS_LIST_SERVICE = Symbol.for(
+  "posthog.core.canvas.listService",
+);

@@ -1,10 +1,11 @@
-import { Lightning } from "@phosphor-icons/react";
+import { SquaresFourIcon } from "@phosphor-icons/react";
 import { CountBadge } from "@posthog/ui/primitives/CountBadge";
+import type { MouseEventHandler } from "react";
 import { SidebarItem } from "../SidebarItem";
 
 interface CommandCenterItemProps {
   isActive: boolean;
-  onClick: () => void;
+  onClick: MouseEventHandler<Element>;
   activeCount?: number;
   depth?: number;
 }
@@ -23,7 +24,9 @@ export function CommandCenterItem({
   return (
     <SidebarItem
       depth={depth}
-      icon={<Lightning size={16} weight={isActive ? "fill" : "regular"} />}
+      icon={
+        <SquaresFourIcon size={16} weight={isActive ? "fill" : "regular"} />
+      }
       label="Command Center"
       isActive={isActive}
       onClick={onClick}

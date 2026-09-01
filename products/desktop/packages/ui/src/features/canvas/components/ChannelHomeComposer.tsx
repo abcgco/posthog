@@ -1,50 +1,59 @@
+import type {
+  PiModelSelection,
+  PiThinkingLevel,
+} from "@posthog/core/pi-runtime/piSessionController";
 import { isValidConfigValue } from "@posthog/core/task-detail/configOptions";
-import { ANALYTICS_EVENTS } from "@posthog/shared/analytics-events";
+import type { AgentRuntime } from "@posthog/shared";
 import type { Task } from "@posthog/shared/domain-types";
-import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import {
+  subscriptionModelAccess,
+  useAdapterSubscription,
+} from "@posthog/ui/features/settings/adapterSubscription";
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useRef,
   useState,
 } from "react";
 import { useConnectivity } from "../../../hooks/useConnectivity";
-import { track } from "../../../shell/analytics";
-import { useOptionalAuthenticatedClient } from "../../auth/authClient";
+import { toast } from "../../../primitives/toast";
+import { spendStopMessage, useSpendStop } from "../../billing/useSpendStop";
+import { useChannelWikiContext } from "../../context-wiki/hooks/useContextWiki";
+import { useContextLayerFlag } from "../../feature-flags/useContextLayerFlag";
+import { useFeatureFlag } from "../../feature-flags/useFeatureFlag";
+import { useFeatureFlagsLoaded } from "../../feature-flags/useFeatureFlagsLoaded";
 import { useUserRepositoryIntegration } from "../../integrations/useIntegrations";
 import { PromptInput } from "../../message-editor/components/PromptInput";
 import { contentToPlainText } from "../../message-editor/content";
 import { useDraftStore } from "../../message-editor/draftStore";
 import type { EditorHandle } from "../../message-editor/types";
-import { toastError } from "../../notifications/errorDetails";
+import { PiModelSelector } from "../../pi-sessions/PiSessionControls";
+import { usePiModelCatalog } from "../../pi-sessions/usePiModelCatalog";
+import type { AgentHarness } from "../../sessions/components/HarnessSubmenu";
 import { ReasoningLevelSelector } from "../../sessions/components/ReasoningLevelSelector";
 import { getCurrentModeFromConfigOptions } from "../../sessions/sessionStore";
 import {
   type AgentAdapter,
   useSettingsStore,
 } from "../../settings/settingsStore";
-import {
-  type WorkspaceMode,
-  WorkspaceModeSelect,
-} from "../../task-detail/components/WorkspaceModeSelect";
-import { useCloudModeEnabled } from "../../task-detail/hooks/useCloudModeEnabled";
+import { cloudTargetIds } from "../../task-detail/cloudTargets";
+import { WorkspaceModeSelect } from "../../task-detail/components/WorkspaceModeSelect";
+import { useCloudTargetSelection } from "../../task-detail/hooks/useCloudTarget";
 import { usePreviewConfig } from "../../task-detail/hooks/usePreviewConfig";
+import { useResolvedWorkspaceMode } from "../../task-detail/hooks/useResolvedWorkspaceMode";
 import { useTaskCreation } from "../../task-detail/hooks/useTaskCreation";
-import { resolveWorkspaceModePreference } from "../../task-detail/hooks/workspaceModePreference";
-import { trackAndCreateCanvas } from "../createCanvasAnalytics";
-import { channelFeedQueryKey } from "../hooks/useChannelFeed";
+import { useUpdateTaskChannelRepositories } from "../hooks/useTaskChannels";
 import {
-  UNTITLED_CANVAS_NAME,
-  useDashboardMutations,
-} from "../hooks/useDashboards";
-import { useGenerateFreeformCanvas } from "../hooks/useGenerateFreeformCanvas";
-import {
-  normalizeChannelName,
-  PERSONAL_CHANNEL_NAME,
-} from "../hooks/useTaskChannels";
+  resolveTaskRepositoryDraft,
+  useTaskRepositoryDraftStore,
+} from "../stores/taskRepositoryDraftStore";
 import type { PendingKickoff } from "./ChannelFeedView";
+import {
+  TaskRepositoryChip,
+  TaskRepositoryDialog,
+} from "./TaskRepositoryDialog";
 
 export interface ChannelHomeComposerHandle {
   /** Drop a starter prompt into the editor and apply its mode, if any. */
@@ -52,12 +61,13 @@ export interface ChannelHomeComposerHandle {
 }
 
 interface ChannelHomeComposerProps {
+  /** Backend channel UUID that owns the created task (its feed home). */
   channelId: string;
   channelName?: string;
   /** Channel CONTEXT.md, attached to the created task as background. */
   channelContext?: string;
-  /** Backend channel UUID that will own the created task (its feed home). */
-  backendChannelId?: string;
+  channelRepositories?: string[];
+  channelGithubIntegration?: number | null;
   onTaskCreated: (task: Task) => void;
   /** Post an optimistic kickoff to the feed the instant a submit is accepted. */
   onPendingStart: (kickoff: PendingKickoff) => void;
@@ -67,10 +77,10 @@ interface ChannelHomeComposerProps {
 
 // The prompt box at the bottom of a channel's homepage. A trimmed-down sibling
 // of TaskInput: it reuses the same task-creation pipeline (model/mode/reasoning
-// preview config + useTaskCreation) but drops the repo/branch pickers — channel
-// tasks run repo-less and the agent attaches a repo lazily if it needs one. The
-// starter-prompt suggestions render in the parent above the box; this owns the
-// local/cloud selector.
+// preview config + useTaskCreation) but drops the branch picker. Tasks default
+// to the space's repositories; the chip beside the local/cloud selector swaps
+// in a task-specific repository or folder selection. The starter-prompt
+// suggestions render in the parent above the box; this owns the selector row.
 export const ChannelHomeComposer = forwardRef<
   ChannelHomeComposerHandle,
   ChannelHomeComposerProps
@@ -79,7 +89,8 @@ export const ChannelHomeComposer = forwardRef<
     channelId,
     channelName,
     channelContext,
-    backendChannelId,
+    channelRepositories = [],
+    channelGithubIntegration = null,
     onTaskCreated,
     onPendingStart,
     onPendingEnd,
@@ -87,43 +98,20 @@ export const ChannelHomeComposer = forwardRef<
   ref,
 ) {
   const sessionId = `channel-home:${channelId}`;
+  const contextLayerEnabled = useContextLayerFlag();
+  const wiki = useChannelWikiContext(channelId, contextLayerEnabled);
+  const effectiveChannelContext = wiki.useLegacy ? channelContext : undefined;
   const editorRef = useRef<EditorHandle>(null);
   const [editorIsEmpty, setEditorIsEmpty] = useState(true);
   const { isOnline } = useConnectivity();
-  const navigate = useNavigate();
-
-  // Canvas mode, armed from the mode selector (like Autoresearch on the
-  // new-task composer): the next submit generates a canvas from the prompt —
-  // create a canvas in the channel, kick off freeform generation, and open it —
-  // instead of creating a plain task. This replaces the prompt-to-canvas entry
-  // the old channel landing had.
-  const [canvasArmed, setCanvasArmed] = useState(false);
-  const { createDashboard } = useDashboardMutations();
-  const { generate: generateCanvas, isStarting: isStartingCanvas } =
-    useGenerateFreeformCanvas({
-      channelId,
-      channelName: channelName ?? "",
-      // The parent already fetches the channel CONTEXT.md; passing it keeps
-      // the hook from running its own duplicate fetch.
-      channelContext,
-    });
-
-  const toggleCanvasMode = useCallback(() => {
-    track(ANALYTICS_EVENTS.CHANNEL_ACTION, {
-      action_type: "canvas_mode_toggle",
-      surface: "channel_home",
-      channel_id: channelId,
-      armed: !canvasArmed,
-    });
-    setCanvasArmed(!canvasArmed);
-  }, [channelId, canvasArmed]);
 
   const {
     lastUsedAdapter,
     setLastUsedAdapter,
-    lastUsedWorkspaceMode,
-    setLastUsedWorkspaceMode,
-    setLastUsedLocalWorkspaceMode,
+    lastUsedAgentRuntime,
+    setLastUsedAgentRuntime,
+    lastUsedPiModel,
+    setLastUsedPiModel,
     allowBypassPermissions,
     defaultInitialTaskMode,
     lastUsedInitialTaskMode,
@@ -132,35 +120,63 @@ export const ChannelHomeComposer = forwardRef<
   } = useSettingsStore();
 
   const adapter = lastUsedAdapter;
+  const claudeSubscription = useAdapterSubscription("claude");
+  const codexSubscription = useAdapterSubscription("codex");
+  const [runtime, setRuntime] = useState<AgentRuntime>("acp");
+  // Keep the menu open when a harness switch swaps its ACP/Pi control.
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const didResolveRuntimeRef = useRef(false);
+  const [selectedPiModelId, setSelectedPiModelId] = useState<string | null>(
+    null,
+  );
+  const [selectedPiThinkingLevel, setSelectedPiThinkingLevel] =
+    useState<PiThinkingLevel | null>(null);
+  const piHarnessEnabled = useFeatureFlag("pi-harness");
+  const flagsLoaded = useFeatureFlagsLoaded();
+  const { data: piModelCatalog = [], isPending: isPiConfigLoading } =
+    usePiModelCatalog(runtime === "pi");
+
   const setAdapter = useCallback(
     (next: AgentAdapter) => setLastUsedAdapter(next),
     [setLastUsedAdapter],
   );
 
-  const cloudModeEnabled = useCloudModeEnabled();
-  const { hasGithubIntegration } = useUserRepositoryIntegration();
+  useEffect(() => {
+    if (didResolveRuntimeRef.current || !flagsLoaded) {
+      return;
+    }
 
-  // Repo-less channel tasks only run local or cloud (worktree needs a repo), so
-  // collapse any lingering worktree preference down to local for the initial pick.
-  const [workspaceMode, setWorkspaceModeState] = useState<WorkspaceMode>(() =>
-    resolveWorkspaceModePreference({
-      preferredMode: lastUsedWorkspaceMode === "cloud" ? "cloud" : "local",
-      cloudModeEnabled,
-      hasGithubIntegration,
-      lastUsedLocalWorkspaceMode: "local",
-    }),
+    didResolveRuntimeRef.current = true;
+    setRuntime(
+      piHarnessEnabled && lastUsedAgentRuntime === "pi" ? "pi" : "acp",
+    );
+  }, [flagsLoaded, lastUsedAgentRuntime, piHarnessEnabled]);
+
+  const { hasGithubIntegration, isLoadingIntegrations } =
+    useUserRepositoryIntegration();
+
+  const { workspaceMode, setWorkspaceMode } = useResolvedWorkspaceMode({
+    hasGithubIntegration,
+    isLoadingIntegrations,
+    allowWorktree: false,
+  });
+  const { cloudTarget, setCloudTarget } = useCloudTargetSelection();
+  const cloudIds = workspaceMode === "cloud" ? cloudTargetIds(cloudTarget) : {};
+  const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
+  const repositoryDraft = useTaskRepositoryDraftStore(
+    (s) => s.drafts[channelId],
   );
-  const [selectedCloudEnvId, setSelectedCloudEnvId] = useState<string | null>(
-    null,
+  const setRepositoryDraft = useTaskRepositoryDraftStore((s) => s.setDraft);
+  const {
+    repositories: taskRepositories,
+    githubIntegration: taskGithubIntegration,
+    folder: taskFolder,
+  } = resolveTaskRepositoryDraft(
+    repositoryDraft,
+    channelRepositories,
+    channelGithubIntegration,
   );
-  const setWorkspaceMode = useCallback(
-    (mode: WorkspaceMode) => {
-      setWorkspaceModeState(mode);
-      setLastUsedWorkspaceMode(mode);
-      if (mode !== "cloud") setLastUsedLocalWorkspaceMode(mode);
-    },
-    [setLastUsedWorkspaceMode, setLastUsedLocalWorkspaceMode],
-  );
+  const updateChannelRepositories = useUpdateTaskChannelRepositories();
 
   const {
     modeOption,
@@ -196,81 +212,25 @@ export const ChannelHomeComposer = forwardRef<
     fastModeOption?.type === "select"
       ? fastModeOption.currentValue === "on"
       : undefined;
-
-  const queryClient = useQueryClient();
-  const apiClient = useOptionalAuthenticatedClient();
-  const handleCanvasSubmit = useCallback(async () => {
-    const instruction = editorRef.current?.getText().trim();
-    if (!instruction || isStartingCanvas) return;
-    // The folder→backend channel mapping can still be resolving when the user
-    // submits (fresh channel, cold channels list). Resolve it here rather than
-    // silently creating a run the feed will never show. The personal channel
-    // can't be resolved by name; it only arrives via the channels list.
-    let feedChannelId = backendChannelId;
-    const normalizedName = channelName ? normalizeChannelName(channelName) : "";
-    if (
-      !feedChannelId &&
-      apiClient &&
-      normalizedName &&
-      normalizedName !== PERSONAL_CHANNEL_NAME
-    ) {
-      feedChannelId = await apiClient
-        .resolveTaskChannel(normalizedName)
-        .then((c) => c.id)
-        .catch(() => undefined);
-    }
-    let record: { id: string; name: string };
-    try {
-      record = await trackAndCreateCanvas(
-        channelId,
-        "freeform",
-        "channel_home",
-        () => createDashboard(channelId, UNTITLED_CANVAS_NAME, "freeform"),
-      );
-    } catch (error) {
-      toastError("Couldn't create canvas", error);
-      return;
-    }
-    // generate() surfaces its own failure toasts; on success it files the task
-    // to the channel and tracks completion for the finished-generation toast.
-    const taskId = await generateCanvas({
-      dashboardId: record.id,
-      name: record.name,
-      templateId: "freeform",
-      instruction,
-      // Owned by the backend channel so the run shows as a card in the feed,
-      // like a plain composer submit.
-      backendChannelId: feedChannelId,
-      adapter: adapter ?? "claude",
-      model: currentModel,
-      reasoningLevel: currentReasoningLevel,
-      useStarter: true,
-    });
-    if (!taskId) return;
-    // Surface the new card without waiting for the feed's next poll.
-    void queryClient.invalidateQueries({
-      queryKey: channelFeedQueryKey(feedChannelId),
-    });
-    editorRef.current?.clear();
-    setCanvasArmed(false);
-    void navigate({
-      to: "/website/$channelId/dashboards/$dashboardId",
-      params: { channelId, dashboardId: record.id },
-    });
-  }, [
-    channelId,
-    channelName,
-    backendChannelId,
-    apiClient,
-    adapter,
-    currentModel,
-    currentReasoningLevel,
-    createDashboard,
-    generateCanvas,
-    isStartingCanvas,
-    navigate,
-    queryClient,
-  ]);
+  const currentPiModel =
+    piModelCatalog.find((model) => model.id === selectedPiModelId) ??
+    piModelCatalog.find((model) => model.id === lastUsedPiModel) ??
+    piModelCatalog.find((model) => model.isDefault) ??
+    piModelCatalog[0];
+  const piThinkingLevels = currentPiModel?.thinkingLevels ?? [];
+  const currentPiThinkingLevel = piThinkingLevels.includes(
+    selectedPiThinkingLevel ?? "high",
+  )
+    ? (selectedPiThinkingLevel ?? "high")
+    : piThinkingLevels[0];
+  const supportsPiThinking = piThinkingLevels.some((level) => level !== "off");
+  const taskModel = runtime === "pi" ? currentPiModel?.id : currentModel;
+  const taskReasoningLevel =
+    runtime === "pi"
+      ? supportsPiThinking
+        ? currentPiThinkingLevel
+        : undefined
+      : currentReasoningLevel;
 
   // In-flight optimistic kickoff ids, oldest first. Submits are serialized
   // (the composer is disabled while creating), so retiring the oldest on each
@@ -292,23 +252,29 @@ export const ChannelHomeComposer = forwardRef<
   const { isCreatingTask, canSubmit, handleSubmit } = useTaskCreation({
     editorRef,
     sessionId,
-    selectedDirectory: "",
-    workspaceMode,
-    sandboxEnvironmentId:
-      workspaceMode === "cloud" && selectedCloudEnvId
-        ? selectedCloudEnvId
+    selectedDirectory: taskFolder,
+    repositories: workspaceMode === "cloud" ? taskRepositories : undefined,
+    githubIntegrationId:
+      workspaceMode === "cloud"
+        ? (taskGithubIntegration ?? undefined)
         : undefined,
+    workspaceMode,
+    sandboxEnvironmentId: cloudIds.sandboxEnvironmentId,
+    customImageId: cloudIds.customImageId,
     editorIsEmpty,
     adapter,
-    executionMode: currentExecutionMode,
-    model: currentModel,
-    reasoningLevel: currentReasoningLevel,
-    contextWindow: currentContextWindow,
-    fastMode: currentFastMode,
+    runtime,
+    executionMode: runtime === "pi" ? undefined : currentExecutionMode,
+    model: taskModel,
+    reasoningLevel: taskReasoningLevel,
+    contextWindow: runtime === "pi" ? undefined : currentContextWindow,
+    fastMode: runtime === "pi" ? undefined : currentFastMode,
     allowNoRepo: true,
-    channelContext,
+    channelContext: effectiveChannelContext,
+    channelContextPath: wiki.path,
+    submissionBlocked: wiki.blocked,
     channelName,
-    channelId: backendChannelId,
+    channelId,
     channelContextId: channelId,
     onTaskCreated: handleTaskCreated,
   });
@@ -366,6 +332,36 @@ export const ChannelHomeComposer = forwardRef<
     },
     [thoughtOption, setConfigOption, setLastUsedReasoningEffort],
   );
+  const handleRuntimeChange = useCallback(
+    (nextRuntime: AgentRuntime) => {
+      didResolveRuntimeRef.current = true;
+      setRuntime(nextRuntime);
+      setLastUsedAgentRuntime(nextRuntime);
+    },
+    [setLastUsedAgentRuntime],
+  );
+  const handleHarnessChange = useCallback(
+    (harness: AgentHarness) => {
+      if (harness === "pi") {
+        handleRuntimeChange("pi");
+        return;
+      }
+
+      handleRuntimeChange("acp");
+      setAdapter(harness);
+    },
+    [handleRuntimeChange, setAdapter],
+  );
+  const handlePiModelChange = useCallback(
+    (model: PiModelSelection) => {
+      setSelectedPiModelId(model.id);
+      setLastUsedPiModel(model.id);
+    },
+    [setLastUsedPiModel],
+  );
+  const handlePiThinkingLevelChange = useCallback((level: PiThinkingLevel) => {
+    setSelectedPiThinkingLevel(level);
+  }, []);
 
   useImperativeHandle(
     ref,
@@ -384,57 +380,109 @@ export const ChannelHomeComposer = forwardRef<
     [sessionId, modeOption, setConfigOption],
   );
 
-  const hints = ["@ to add files", "/ for skills"].join(", ");
-  const isBusy = isCreatingTask || isStartingCanvas;
-  const submitComposer = canvasArmed ? handleCanvasSubmit : submit;
+  const isBusy = isCreatingTask;
+  const spendStop = useSpendStop();
 
   return (
     <div className="relative flex w-full flex-col">
-      {/* Canvas generation always runs in the cloud, so the local/cloud pick
-          doesn't apply while canvas mode is armed. The row floats over the feed,
-          and the trigger's own fill is translucent, so it carries an opaque
-          backdrop at the button's radius to stop messages showing through. */}
-      {!canvasArmed && (
-        <div className="absolute bottom-full left-0 mb-2 flex items-center gap-2 rounded-sm bg-card">
-          <WorkspaceModeSelect
-            value={workspaceMode}
-            onChange={setWorkspaceMode}
-            overrideModes={["local", "cloud"]}
-            selectedCloudEnvironmentId={selectedCloudEnvId}
-            onCloudEnvironmentChange={setSelectedCloudEnvId}
-            size="1"
-            disabled={isBusy}
-          />
-        </div>
-      )}
+      {/* The row sits in normal flow above the input, mirroring the new-task
+          page's composer (the composer scrolls with the feed, so nothing may
+          float over the cards below). */}
+      <div className="mb-2 flex min-w-0 items-center gap-1">
+        <WorkspaceModeSelect
+          value={workspaceMode}
+          onChange={setWorkspaceMode}
+          adapter={runtime === "pi" ? undefined : adapter}
+          overrideModes={["local", "cloud"]}
+          cloudTarget={cloudTarget}
+          onCloudTargetChange={setCloudTarget}
+          size="1"
+          disabled={isBusy}
+        />
+        <TaskRepositoryChip
+          cloud={workspaceMode === "cloud"}
+          repositoryCount={taskRepositories.length}
+          hasFolder={!!taskFolder}
+          disabled={isBusy}
+          onOpen={() => setRepositoryDialogOpen(true)}
+        />
+      </div>
+
+      <TaskRepositoryDialog
+        open={repositoryDialogOpen}
+        onOpenChange={setRepositoryDialogOpen}
+        cloud={workspaceMode === "cloud"}
+        repositories={taskRepositories}
+        integrationId={taskGithubIntegration}
+        folder={taskFolder}
+        onApply={(selection) => {
+          setRepositoryDraft(channelId, {
+            repositories: selection.repositories,
+            githubIntegration: selection.integrationId,
+            folder: selection.folder,
+          });
+          if (selection.saveToSpace && workspaceMode === "cloud") {
+            updateChannelRepositories.mutate(
+              {
+                channelId,
+                githubIntegration: selection.integrationId,
+                repositories: selection.repositories,
+              },
+              {
+                onError: () =>
+                  toast.error("Couldn't save repositories to the space"),
+              },
+            );
+          }
+        }}
+      />
 
       <PromptInput
         ref={editorRef}
         sessionId={sessionId}
-        placeholder={
-          canvasArmed
-            ? "Describe the canvas to build — the agent generates and publishes it"
-            : `What do you want to ship? ${hints}`
-        }
+        placeholder="What do you want to ship?"
         editorHeight="large"
         disabled={isBusy}
         isLoading={isBusy}
         autoFocus
         clearOnSubmit={false}
         submitDisabledExternal={
-          canvasArmed
-            ? editorIsEmpty || isBusy || !isOnline
-            : !canSubmit || isBusy || !isOnline || isLoading
+          !canSubmit ||
+          isBusy ||
+          !isOnline ||
+          (runtime === "pi" ? isPiConfigLoading : isLoading) ||
+          (runtime === "pi" && !currentPiModel) ||
+          spendStop !== null
         }
-        modeOption={modeOption}
-        onModeChange={handleModeChange}
+        submitTooltipOverride={
+          spendStop ? spendStopMessage(spendStop) : undefined
+        }
+        modeOption={runtime === "pi" ? undefined : modeOption}
+        onModeChange={runtime === "pi" ? undefined : handleModeChange}
         allowBypassPermissions={allowBypassPermissions}
-        canvas={{ active: canvasArmed, onToggle: toggleCanvasMode }}
         enableCommands
         enableBashMode={false}
-        modelSelector={null}
+        modelSelector={
+          runtime === "pi" ? (
+            <PiModelSelector
+              models={piModelCatalog}
+              currentModel={currentPiModel}
+              thinkingLevel={
+                supportsPiThinking ? currentPiThinkingLevel : undefined
+              }
+              thinkingLevels={piThinkingLevels}
+              disabled={isBusy || isPiConfigLoading}
+              isLoading={isPiConfigLoading}
+              onChange={handlePiModelChange}
+              onThinkingLevelChange={handlePiThinkingLevelChange}
+              onHarnessChange={handleHarnessChange}
+              menuOpen={modelMenuOpen}
+              onMenuOpenChange={setModelMenuOpen}
+            />
+          ) : null
+        }
         reasoningSelector={
-          !isLoading && (
+          runtime === "pi" ? null : (
             <ReasoningLevelSelector
               thoughtOption={thoughtOption}
               modelOption={modelOption}
@@ -444,15 +492,27 @@ export const ChannelHomeComposer = forwardRef<
               onChange={handleThoughtChange}
               onModelChange={handleModelChange}
               onAdapterChange={setAdapter}
+              onHarnessChange={
+                piHarnessEnabled ? handleHarnessChange : undefined
+              }
+              includePiHarness={piHarnessEnabled}
               onConfigOptionChange={setConfigOption}
+              menuOpen={modelMenuOpen}
+              onMenuOpenChange={setModelMenuOpen}
+              modelAccess={subscriptionModelAccess(
+                adapter === "codex" ? codexSubscription : claudeSubscription,
+                workspaceMode,
+              )}
+              showBillingMenu
               disabled={isBusy}
+              isLoading={isLoading}
             />
           )
         }
         onEmptyChange={setEditorIsEmpty}
-        onSubmitClick={() => void submitComposer()}
+        onSubmitClick={() => void submit()}
         onSubmit={() => {
-          if (canvasArmed || canSubmit) void submitComposer();
+          if (canSubmit) void submit();
         }}
       />
     </div>

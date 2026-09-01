@@ -69,6 +69,16 @@ vi.mock("./mcp/tool-metadata", () => ({
   getMcpToolMetadata: vi.fn().mockReturnValue(undefined),
 }));
 
+// Returns a truthy stub so the rest of the suite doesn't trip the "cloud run
+// registered no local tools" warning.
+const createLocalToolsMcpServer = vi.hoisted(() =>
+  vi.fn(() => ({ instance: {} })),
+);
+
+vi.mock("./mcp/local-tools", () => ({
+  createLocalToolsMcpServer,
+}));
+
 // Import after the mocks so ClaudeAcpAgent resolves the mocked SDK
 const { ClaudeAcpAgent } = await import("./claude-agent");
 type Agent = InstanceType<typeof ClaudeAcpAgent>;
@@ -135,6 +145,7 @@ describe("ClaudeAcpAgent session creation", () => {
       commands: [],
       models: [],
     });
+    createLocalToolsMcpServer.mockClear();
     // No gateway: fetchGatewayModels returns [] and the requested model is
     // kept as a custom option — mirrors the gateway-outage failure mode.
     delete process.env.ANTHROPIC_BASE_URL;
@@ -289,6 +300,28 @@ describe("ClaudeAcpAgent session creation", () => {
     },
   );
 
+  it("passes repository-less mode to the local-tools server", async () => {
+    const agent = makeAgent();
+
+    await agent.newSession({
+      cwd,
+      mcpServers: [],
+      _meta: {
+        environment: "cloud",
+        channelMode: true,
+        taskRunId: "run-channel",
+      },
+    });
+
+    expect(createLocalToolsMcpServer).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd }),
+      expect.objectContaining({
+        environment: "cloud",
+        channelMode: true,
+      }),
+    );
+  });
+
   // The SDK does not carry the model across resume — without an explicit
   // setModel the resumed session silently runs the SDK default (opus).
   it.each([
@@ -303,7 +336,7 @@ describe("ClaudeAcpAgent session creation", () => {
       name: "pins the default model explicitly when resuming without meta.model",
       sessionId: "0197a000-0000-7000-8000-000000000002",
       model: undefined,
-      expectedSetModel: "opus",
+      expectedSetModel: "claude-opus-4-8",
       expectedCurrentValue: "claude-opus-4-8",
     },
   ])(
@@ -379,13 +412,9 @@ describe("ClaudeAcpAgent session creation", () => {
     },
   );
 
-  // New sessions pass the model to the SDK at spawn, never via setModel. The
-  // Codex-model row guards the desync that surfaced as "picked gpt-5.5, session
-  // ran Opus": a non-Anthropic id on the Claude adapter must fall back to the
-  // default AND warn rather than silently masquerade as a deliberate Opus run.
   it.each([
     {
-      name: "uses the gateway default and never calls setModel without a requested model",
+      name: "pins the gateway default explicitly at spawn so it never rides the floating SDK alias",
       model: undefined,
       expectsWarn: false,
     },
@@ -404,7 +433,9 @@ describe("ClaudeAcpAgent session creation", () => {
       _meta: { taskRunId: "run-new", ...(model ? { model } : {}) },
     });
 
-    expect(createdQueries[0].setModel).not.toHaveBeenCalled();
+    expect(createdQueries[0].setModel).toHaveBeenCalledWith(
+      DEFAULT_GATEWAY_MODEL,
+    );
     expect(getModelConfigOption(response)?.currentValue).toBe(
       DEFAULT_GATEWAY_MODEL,
     );

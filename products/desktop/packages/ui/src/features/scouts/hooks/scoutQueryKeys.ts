@@ -1,8 +1,8 @@
 export const scoutQueryKeys = {
   configs: (projectId: number | null) =>
     ["scouts", "configs", projectId] as const,
-  metadata: (projectId: number | null) =>
-    ["scouts", "metadata", projectId] as const,
+  fleetSync: (projectId: number | null) =>
+    ["scouts", "fleetSync", projectId] as const,
   runs: (projectId: number | null) => ["scouts", "runs", projectId] as const,
   skillCreators: (projectId: number | null) =>
     ["scouts", "skillCreators", projectId] as const,

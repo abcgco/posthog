@@ -4,7 +4,11 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  channels: [] as { id: string; name: string; path: string }[],
+  channels: [] as {
+    id: string;
+    name: string;
+    channelType: "public" | "personal";
+  }[],
   isLoading: false,
   toggleStar: vi.fn(),
 }));
@@ -26,8 +30,12 @@ vi.mock("@posthog/ui/features/canvas/hooks/useChannelStars", () => ({
 import { useChannelPaneStore } from "@posthog/ui/features/canvas/stores/channelPaneStore";
 import { ChannelBackRow } from "./ChannelBackRow";
 
-const ENG = { id: "eng-id", name: "engineering", path: "/engineering" };
-const ME = { id: "me-id", name: "me", path: "/me" };
+const ENG = {
+  id: "eng-id",
+  name: "engineering",
+  channelType: "public" as const,
+};
+const ME = { id: "me-id", name: "me", channelType: "personal" as const };
 
 function renderRow(channelId: string) {
   return render(
@@ -42,7 +50,10 @@ describe("ChannelBackRow", () => {
     vi.clearAllMocks();
     mocks.channels = [ME, ENG];
     mocks.isLoading = false;
-    useChannelPaneStore.setState({ pane: "channel" });
+    useChannelPaneStore.setState({
+      pane: "channel",
+      animateTransition: false,
+    });
   });
 
   it("names the channel you're in", () => {
@@ -57,6 +68,7 @@ describe("ChannelBackRow", () => {
     await user.click(screen.getByRole("button", { name: "Back to spaces" }));
 
     expect(useChannelPaneStore.getState().pane).toBe("list");
+    expect(useChannelPaneStore.getState().animateTransition).toBe(true);
   });
 
   // #me can't be starred, so its well is empty — but the well is still there,

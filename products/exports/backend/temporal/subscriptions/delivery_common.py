@@ -5,6 +5,7 @@ from slack_sdk.errors import SlackApiError
 from structlog import get_logger
 from temporalio.exceptions import ApplicationError
 
+from posthog.email import EmailDeliveryError
 from posthog.exceptions_capture import capture_exception
 from posthog.models.integration import Integration
 from posthog.sync import database_sync_to_async
@@ -19,6 +20,7 @@ from products.exports.backend.temporal.subscriptions.types import (
 from ee.tasks.subscriptions import SLACK_USER_CONFIG_ERRORS, _capture_delivery_failed_event
 from ee.tasks.subscriptions.auto_disable import (
     SLACK_DISCONNECTED_DISABLE_REASON,
+    SLACK_FILE_UPLOAD_PERMISSION_REVOKED_DISABLE_REASON,
     SLACK_PERMISSION_REVOKED_DISABLE_REASON,
     DisableReason,
     disable_invalid_subscription,
@@ -26,6 +28,11 @@ from ee.tasks.subscriptions.auto_disable import (
 from ee.tasks.subscriptions.slack_subscriptions import SlackDeliveryResult, get_slack_integration_for_team
 
 LOGGER = get_logger(__name__)
+
+# Cap recipient_results echoed into an ApplicationError's details — Temporal serializes error
+# details into history events capped at the gRPC payload limit, and an oversized non-retryable
+# error can't be recorded, leaving the workflow unable to complete its failing task.
+_MAX_ERROR_DETAIL_RESULTS = 50
 
 
 def strip_null_bytes(value: Any) -> Any:
@@ -60,6 +67,7 @@ async def auto_disable_and_return(
             recipient=subscription.target_value,
             status="failed",
             error={"message": reason.description, "type": reason.key},
+            human_readable_error=reason.description,
         )
     )
     # `_capture_delivery_failed_event` only reads `str(e)` and `type(e).__name__`,
@@ -95,7 +103,7 @@ async def deliver_email(
     )
 
     success_count = 0
-    last_error: Exception | None = None
+    failures: list[tuple[str, Exception]] = []
     for email in emails:
         try:
             await send_one(email)
@@ -114,10 +122,13 @@ async def deliver_email(
             _capture_delivery_failed_event(subscription, exc)
             recipient_results.append(
                 RecipientResult(
-                    recipient=email, status="failed", error={"message": str(exc), "type": type(exc).__name__}
+                    recipient=email,
+                    status="failed",
+                    error={"message": str(exc), "type": type(exc).__name__},
+                    human_readable_error=None,
                 )
             )
-            last_error = exc
+            failures.append((email, exc))
 
     await LOGGER.ainfo(
         "deliver_subscription.email_complete",
@@ -126,8 +137,33 @@ async def deliver_email(
         total_count=len(emails),
     )
 
-    if last_error is not None and success_count == 0:
-        raise last_error
+    if failures and success_count == 0:
+        # Whole batch failed. Retryability is decided per recipient, not by which error
+        # happened to be last: any transient failure means a retry must run so those
+        # recipients get another attempt (dedupe skips the already-delivered ones). Only
+        # when every recipient hit a permanent rejection (EmailDeliveryError) is the batch
+        # non-retryable — retrying then could never succeed.
+        # Bound the error details: a huge recipient list with a domain-wide bounce would
+        # otherwise exceed Temporal's gRPC payload cap and wedge the workflow mid-failure.
+        details: list[dict[str, Any]] = [
+            {
+                "recipient": result.recipient,
+                "status": result.status,
+                **({"error": result.error} if result.error else {}),
+            }
+            for result in recipient_results[:_MAX_ERROR_DETAIL_RESULTS]
+        ]
+        if len(recipient_results) > _MAX_ERROR_DETAIL_RESULTS:
+            details.append({"truncated_count": len(recipient_results) - _MAX_ERROR_DETAIL_RESULTS})
+        permanent = [err for _, err in failures if isinstance(err, EmailDeliveryError)]
+        if permanent and len(permanent) == len(failures):
+            raise ApplicationError(
+                f"all {len(failures)} recipients permanently rejected delivery",
+                {"recipient_results": details},
+                non_retryable=True,
+            ) from permanent[0]
+        # Mixed or all-transient: re-raise a retryable error so Temporal retries the batch.
+        raise next(err for _, err in failures if not isinstance(err, EmailDeliveryError))
     return DeliverSubscriptionResult(recipient_results=recipient_results)
 
 
@@ -164,7 +200,8 @@ async def deliver_slack(
     except ApplicationError:
         raise
     except Exception as exc:
-        slack_error_code = exc.response.get("error") if isinstance(exc, SlackApiError) else None
+        slack_response = exc.response if isinstance(exc, SlackApiError) else {}
+        slack_error_code = slack_response.get("error")
         _capture_delivery_failed_event(subscription, exc)
         LOGGER.error(
             "deliver_subscription.slack_failed",
@@ -177,9 +214,15 @@ async def deliver_slack(
         capture_exception(exc)
         if slack_error_code in SLACK_USER_CONFIG_ERRORS:
             # Won't self-heal without user action — auto-disable so it stops re-firing.
-            return await auto_disable_and_return(
-                subscription, SLACK_PERMISSION_REVOKED_DISABLE_REASON, recipient_results
+            needed_scopes = {
+                scope.strip() for scope in str(slack_response.get("needed") or "").split(",") if scope.strip()
+            }
+            reason = (
+                SLACK_FILE_UPLOAD_PERMISSION_REVOKED_DISABLE_REASON
+                if "files:write" in needed_scopes
+                else SLACK_PERMISSION_REVOKED_DISABLE_REASON
             )
+            return await auto_disable_and_return(subscription, reason, recipient_results)
         raise  # Transient Slack errors — let Temporal retry
 
     if result.is_complete_success:
@@ -192,14 +235,14 @@ async def deliver_slack(
             failed_thread_count=len(result.failed_thread_message_indices),
             total_thread_count=result.total_thread_messages,
         )
+        failed_count = len(result.failed_thread_message_indices)
+        partial_message = f"{failed_count} thread message{'s' if failed_count != 1 else ''} failed"
         recipient_results.append(
             RecipientResult(
                 recipient=subscription.target_value,
                 status="partial",
-                error={
-                    "message": f"{len(result.failed_thread_message_indices)} thread message(s) failed",
-                    "type": "partial_thread_failure",
-                },
+                error={"message": partial_message, "type": "partial_thread_failure"},
+                human_readable_error=partial_message,
             )
         )
     return DeliverSubscriptionResult(recipient_results=recipient_results)

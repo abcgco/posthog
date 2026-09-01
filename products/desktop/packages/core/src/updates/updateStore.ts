@@ -78,10 +78,6 @@ export const updateStore = createStore<UpdateState>((set) => ({
 }));
 
 export const getUpdateUiStatus = () => updateStore.getState().status;
-export const getUpdateVersion = () => updateStore.getState().version;
-export const getMenuCheckPending = () =>
-  updateStore.getState().menuCheckPending;
-
 export interface UpdateStatusUpdate {
   status?: UpdateUiStatus;
   version?: string | null;
@@ -108,6 +104,7 @@ export function deriveUpdateUiStatus(
   if (payload.checking && payload.downloading) {
     return {
       status: "downloading",
+      version: null,
       availableVersion: payload.availableVersion ?? null,
       releaseNotes: payload.releaseNotes ?? null,
       releaseDate: payload.releaseDate ?? null,
@@ -120,6 +117,7 @@ export function deriveUpdateUiStatus(
   if (payload.available) {
     return {
       status: "available",
+      version: null,
       availableVersion: payload.availableVersion ?? null,
       releaseNotes: payload.releaseNotes ?? null,
       releaseDate: payload.releaseDate ?? null,

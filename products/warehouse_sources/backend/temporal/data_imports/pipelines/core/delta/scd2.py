@@ -10,6 +10,7 @@ from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.arr
     first_per_pk_table,
     normalize_column_name,
     realign_decimal_buffers,
+    relax_batch_nullability,
 )
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta.evolution import evolve_delta_schema
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta.ops import (
@@ -18,21 +19,19 @@ from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.del
 )
 
 if TYPE_CHECKING:
-    from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta_table_helper import (
-        DeltaTableHelper,
-    )
+    from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.delta.table import DeltaTableRef
 
 
 class Scd2DeltaWriter:
     """SCD Type 2 writer over one schema's Delta table.
 
-    Stateless over a `DeltaTableHelper`, which holds the cached table handle — construct one at
+    Stateless over a `DeltaTableRef`, which holds the cached table handle — construct one at
     the call site. The validity-interval column names are injected so the writer stays generic;
     today's only caller is the CDC load path, which passes the columns `cdc/batcher.py` stamps
     via `build_scd2_table`.
     """
 
-    def __init__(self, table: "DeltaTableHelper", *, valid_from_column: str, valid_to_column: str) -> None:
+    def __init__(self, table: "DeltaTableRef", *, valid_from_column: str, valid_to_column: str) -> None:
         self._table = table
         self._logger = table.logger
         self._valid_from_column = valid_from_column
@@ -58,6 +57,11 @@ class Scd2DeltaWriter:
         # whose take() output is freshly allocated, so realigning `data` here covers both the
         # close and the append.
         data = realign_decimal_buffers(data)
+
+        # A source can declare a column NOT NULL and still send nulls in it, and both delta calls
+        # below refuse such a batch. Correct the claim before either runs (see
+        # relax_batch_nullability).
+        data = relax_batch_nullability(data)
 
         delta_table = await self._table.get_delta_table()
 
