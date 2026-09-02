@@ -165,6 +165,14 @@ services:
             # collect them yourself.
             CSP_REPORT_ENDPOINT: ${CSP_REPORT_ENDPOINT:-}
             DEPLOYMENT: 'hobby'
+            # Куда bin/migrate накатывает схему людей. Без этой строки команда
+            # apply_persons_migrations берёт своё умолчание — базу posthog_persons,
+            # — а приём людей читает главную базу (PERSONS_DATABASE_URL ниже и у
+            # plugins с ingestion-*). Схема и данные разъезжаются: 02.09.2026 колонка
+            # is_deleted появилась в пустой posthog_persons, а приём событий падал
+            # на её отсутствии в главной, и события не доходили до хранилища вовсе.
+            # На hobby люди живут в главной базе — так это и задумано самой командой.
+            PERSONS_DB_WRITER_URL: 'postgres://posthog:posthog@db:5432/posthog'
             PERSONHOG_ADDR: 'personhog-router:50052'
             PERSONHOG_ENABLED: 'true'
             FEATURE_FLAGS_SERVICE_URL: 'http://feature-flags:3001'
@@ -212,6 +220,14 @@ services:
             CDP_VALKEY_HOST: valkey
             CDP_VALKEY_PORT: 6379
             ENCRYPTION_SALT_KEYS: $ENCRYPTION_SALT_KEYS
+            # Рабочие процессы CDP требуют эту переменную и без неё роняют весь
+            # плагин-сервер: с 27.08.2026 он перезапускался по кругу. У апстрима
+            # в hobby её нет вовсе, то есть их раскладка с плагин-сервером не
+            # едет. База отдельная, со своим набором схем из
+            # rust/cyclotron-node-migrations; init-скрипт Postgres создаёт её
+            # только при первой инициализации тома, поэтому на живой установке
+            # её заводят руками.
+            CYCLOTRON_NODE_DATABASE_URL: 'postgres://posthog:posthog@db:5432/cyclotron_node'
             PERSONS_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             BEHAVIORAL_COHORTS_DATABASE_URL: 'postgres://posthog:posthog@db:5432/posthog'
             PERSONHOG_ENABLED: 'true'
