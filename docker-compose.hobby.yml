@@ -304,17 +304,18 @@ services:
         logging: *default-logging
         environment:
             PLUGIN_SERVER_MODE: 'ingestion-errortracking'
-            # HOS-50tp (09.08.2026): апстримовский hobby-компоуз отстал от новой
-            # архитектуры error tracking, и обе стороны разъехались по умолчаниям.
-            # 1) capture пишет исключения в error_tracking_events (rust/capture/src/config.rs,
-            #    envconfig default), а этот потребитель по умолчанию читает
-            #    ingestion-errortracking-main, куда никто никогда не писал: 0 сообщений.
-            # 2) ERROR_TRACKING_CYMBAL_BASE_URL по умолчанию localhost:3302, то есть сам
-            #    контейнер потребителя, а не соседний сервис cymbal.
-            # Итог до правки: с 03.08 каждый краш и каждое серверное исключение молча
-            # копились в Kafka и не доходили ни до ClickHouse, ни до интерфейса.
-            # Второй пункт апстрим с тех пор починил сам, первый — нет.
-            ERROR_TRACKING_CONSUMER_CONSUME_TOPIC: 'error_tracking_events'
+            # Очередь исключений тут НЕ задаётся намеренно: у потребителя умолчание
+            # ingestion-errortracking-main, и ровно это имя docker-compose.base.yml
+            # задаёт приёмнику (KAFKA_ERROR_TRACKING_TOPIC). Обе стороны сходятся сами.
+            #
+            # 09.08.2026 они разъезжались в другую сторону: приёмник брал свой
+            # envconfig-умолчание error_tracking_events, и я перевёл потребителя туда.
+            # После мержа апстрим закрепил приёмнику ingestion-errortracking-main, и та
+            # правка стала причиной разрыва: 02.09.2026 исключения принимались с кодом
+            # 200 и оседали в ingestion-errortracking-main, которую никто не читал.
+            #
+            # Вывод на будущее: имя очереди задавать только там, где его задаёт апстрим,
+            # иначе следующий его шаг снова разведёт стороны.
             ERROR_TRACKING_CYMBAL_BASE_URL: 'http://cymbal:3302'
             PERSONHOG_ENABLED: 'true'
             PERSONHOG_ADDR: 'personhog-router:50052'
