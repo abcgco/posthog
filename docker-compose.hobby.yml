@@ -92,6 +92,7 @@ services:
             service: worker
         environment:
             SITE_URL: https://$DOMAIN
+            OPT_OUT_CAPTURE: 'true'
             SECRET_KEY: $POSTHOG_SECRET
             OBJECT_STORAGE_ACCESS_KEY_ID: 'object_storage_root_user'
             OBJECT_STORAGE_SECRET_ACCESS_KEY: 'object_storage_root_password'
@@ -510,6 +511,7 @@ services:
         image: $REGISTRY_URL:$POSTHOG_APP_TAG
         environment:
             SITE_URL: https://$DOMAIN
+            OPT_OUT_CAPTURE: 'true'
             SECRET_KEY: $POSTHOG_SECRET
             SKIP_ASYNC_MIGRATIONS_SETUP: 0
 
@@ -551,6 +553,7 @@ services:
         image: $REGISTRY_URL:$POSTHOG_APP_TAG
         environment:
             SITE_URL: https://$DOMAIN
+            OPT_OUT_CAPTURE: 'true'
             SECRET_KEY: $POSTHOG_SECRET
             FEATURE_FLAGS_SERVICE_URL: 'http://feature-flags:3001'
             CLICKHOUSE_LOGS_CLUSTER_HOST: 'clickhouse'
