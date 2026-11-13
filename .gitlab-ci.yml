@@ -2,7 +2,7 @@ stages:
   - deploy
 
 variables:
-  GIT_DEPTH: 0
+  GIT_STRATEGY: none
   DEPLOY_DIR: /opt/posthog
   REPO_URL: ${POSTHOG_REPO_URL}
 
