@@ -110,6 +110,26 @@ deploy_posthog:
     - master
   when: manual
 
+apply_posthog_config:
+  stage: deploy
+  tags:
+    - monitoring-server
+  variables:
+    SERVICES: "worker proxy"
+  script:
+    - cd $DEPLOY_DIR/posthog
+    - git fetch origin
+    - git reset --hard origin/master
+    - cd $DEPLOY_DIR
+    - cp posthog/docker-compose.base.yml docker-compose.base.yml
+    - cp posthog/docker-compose.hobby.yml docker-compose.yml
+    - docker compose -f docker-compose.yml up -d --no-build --no-deps --pull never $SERVICES
+    - docker compose -f docker-compose.yml ps $SERVICES
+  only:
+    - main
+    - master
+  when: manual
+
 stop_posthog:
   stage: deploy
   tags:
