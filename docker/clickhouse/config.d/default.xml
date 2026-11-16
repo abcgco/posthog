@@ -1,6 +1,10 @@
 <clickhouse>
     <tcp_port>9000</tcp_port>
 
+    <send_crash_reports>
+        <enabled>false</enabled>
+    </send_crash_reports>
+
     <remote_servers>
         <posthog>
             <shard>

@@ -123,8 +123,17 @@ apply_posthog_config:
     - cd $DEPLOY_DIR
     - cp posthog/docker-compose.base.yml docker-compose.base.yml
     - cp posthog/docker-compose.hobby.yml docker-compose.yml
+    - |
+      CLICKHOUSE_CHANGED=0
+      diff -rq posthog/docker/clickhouse docker/clickhouse >/dev/null || CLICKHOUSE_CHANGED=1
+      mkdir -p docker
+      cp -rf posthog/docker/. docker/
+      if [ "$CLICKHOUSE_CHANGED" = "1" ]; then
+        echo "Настройки ClickHouse изменились, перезапуск"
+        docker compose -f docker-compose.yml restart clickhouse
+      fi
     - docker compose -f docker-compose.yml up -d --no-build --no-deps --pull never $SERVICES
-    - docker compose -f docker-compose.yml ps $SERVICES
+    - docker compose -f docker-compose.yml ps clickhouse $SERVICES
   only:
     - main
     - master
